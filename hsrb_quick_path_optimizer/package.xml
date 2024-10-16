@@ -1,0 +1,29 @@
+<package format="3">
+  <name>hsrb_quick_path_optimizer</name>
+  <version>2.0.0</version>
+  <description> Optimize local trajectory </description>
+  <maintainer email="xr-hsr-support@mail.toyota.co.jp">HSR Support</maintainer>
+  <license>BSD 3-clause Clear License</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <build_depend>eigen</build_depend>
+
+  <depend>angles</depend>
+  <depend>hsrb_base_controllers</depend>
+  <depend>moveit_msgs</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>tf2_eigen</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>tmc_robot_local_planner</depend>
+  <depend>tmc_robot_local_planner_utils</depend>
+  <depend>tmc_timeopt</depend>
+  <depend>tmc_utils</depend>
+
+  <test_depend>ament_cmake_gmock</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+ </package>

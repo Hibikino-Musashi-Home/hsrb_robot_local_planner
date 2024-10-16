@@ -1,0 +1,22 @@
+<library path="plugins_for_hsrb_robot_local_planner_node_tests">
+  <class name="hsrb_robot_local_planner_node/GeneratorPlugin"
+         type="hsrb_robot_local_planner_node::GeneratorPlugin"
+         base_class_type="tmc_robot_local_planner::IGenerator">
+    <description> Plugin for unit tests </description>
+  </class>
+  <class name="hsrb_robot_local_planner_node/EvaluatorPlugin"
+         type="hsrb_robot_local_planner_node::EvaluatorPlugin"
+         base_class_type="tmc_robot_local_planner::IEvaluator">
+    <description> Plugin for unit tests </description>
+  </class>
+  <class name="hsrb_robot_local_planner_node/ValidatorPlugin"
+         type="hsrb_robot_local_planner_node::ValidatorPlugin"
+         base_class_type="tmc_robot_local_planner::IValidator">
+    <description> Plugin for unit tests </description>
+  </class>
+  <class name="hsrb_robot_local_planner_node/OptimizerPlugin"
+         type="hsrb_robot_local_planner_node::OptimizerPlugin"
+         base_class_type="tmc_robot_local_planner::IOptimizer">
+    <description> Plugin for unit tests </description>
+  </class>
+</library>

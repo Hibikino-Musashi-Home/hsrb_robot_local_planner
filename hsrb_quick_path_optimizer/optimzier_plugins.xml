@@ -1,0 +1,12 @@
+<library path="hsrb_quick_path_optimizer">
+  <class name="hsrb_quick_path_optimizer/OptimizerPlugin"
+         type="hsrb_quick_path_optimizer::OptimizerPlugin"
+         base_class_type="tmc_robot_local_planner::IOptimizer">
+    <description> simple optimizer </description>
+  </class>
+  <class name="hsrb_quick_path_optimizer/OptimizerPluginMultiThread"
+         type="hsrb_quick_path_optimizer::OptimizerPluginMultiThread"
+         base_class_type="tmc_robot_local_planner::IOptimizer">
+    <description> multi-thread optimizer </description>
+  </class>
+</library>

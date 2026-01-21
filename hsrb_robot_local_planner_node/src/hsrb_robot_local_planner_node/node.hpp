@@ -51,12 +51,12 @@ DAMAGE.
 #include <tmc_robot_local_planner_utils/arrival_rate_calculator.hpp>
 
 #include "arrival_percentage_publisher.hpp"
-#include "hsrb_joint_trajectories_publisher.hpp"
+#include "joint_trajectories_publisher.hpp"
 #include "utils.hpp"
 
 namespace hsrb_robot_local_planner_node {
 
-/// @brief Robot Local Planner base class for HSR
+/// @brief Base class for Robot Local Planner for HSR
 class RobotLocalPlannerNodeBase : public rclcpp::Node {
  public:
   RobotLocalPlannerNodeBase();
@@ -77,7 +77,6 @@ class RobotLocalPlannerNodeBase : public rclcpp::Node {
   virtual PlanResult PlanImpl(
       const std::optional<tmc_manipulation_types::TimedRobotTrajectory>& previous_trajectory,
       const tmc_manipulation_types::RobotState& initial_state,
-      const std::vector<std::string>& ignore_joints,
       const RobotLocalGoal& constraints) = 0;
 
  private:
@@ -88,18 +87,19 @@ class RobotLocalPlannerNodeBase : public rclcpp::Node {
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
 
-  // Conditions of goals
+  // Constraint conditions for the target
   bool constraints_are_changed_;
   RobotLocalGoal constraints_;
 
-  // Judgment of whether or not it has reached the goal
+  // Detector for whether the target has been reached or not
   std::shared_ptr<DisplacementChecker> displacement_checker_;
   bool use_current_state_for_displacement_;
 
-  // Orbit planned with the previous loop
+  // Trajectory planned in the previous loop
   tf2::Stamped<tmc_manipulation_types::TimedRobotTrajectory> current_trajectory_;
+  bool enable_base_prev_;
 
-  // Parameter
+  // Parameters
   bool remove_completed_constraints_;
   double acceralation_limit_;
 
@@ -119,33 +119,33 @@ class RobotLocalPlannerNodeBase : public rclcpp::Node {
   std::mutex constraints_mutex_;
 
   // Publishers
-  HsrbJointTrajectoriesPublisher::Ptr joint_trajectories_pub_;
+  JointTrajectoriesPublisher::Ptr joint_trajectories_pub_;
   std::shared_ptr<RobotLocalPlannerStatusPublisher> status_pub_;
 
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr is_empty_pub_;
   void PublishIsEmpty(bool is_empty) const;
 
-  /// @brief Returns the state / position expected from the current ODOM and the speed
+  /// @brief Returns the predicted state and position from the current odom and velocity
   /// @return RobotState
   tmc_manipulation_types::RobotState GenerateInitialState();
 
-  /// @brief Calculate the bogie speed in the initial state
-  /// @param ODOM Odometry
-  /// @param ODOM_OUT After calculation
+  /// @brief Calculates the initial cart velocity
+  /// @param odom Odometry
+  /// @param odom_out Odometry after calculation
   void CalcInitOdomState(nav_msgs::msg::Odometry& odom_out);
 
-  /// @brief Update the initial posture from the orbit to the posture after the target time
-  /// @param target_time target time
-  /// @param Initial_state posture after the target time
-  /// @param Ref_STATE Robot state for termination judgment
-  /// @param Connectable_Time Connected orbital point time
-  void UpdateRobotstate(
+  /// @brief Updates the initial posture to the posture after the target time from the trajectory
+  /// @param target_time Target time
+  /// @param initial_state Posture after the target time
+  /// @param ref_state Robot state for termination judgment
+  /// @param connectable_time Time of connectable trajectory point
+  bool UpdateRobotstate(
       const rclcpp::Time& target_time,
       tmc_manipulation_types::RobotState& initial_state,
       tmc_manipulation_types::RobotState& ref_state,
       rclcpp::Time& connectable_time);
 
-  /// @brief Delete several orbit points
+  /// @brief Deletes several trajectory points
   uint32_t DeleteTrajectoryFewPoints(const tmc_manipulation_types::RobotState& initial_state,
                                      const tmc_manipulation_types::TimedRobotTrajectory& trajectory) const;
 };
@@ -153,7 +153,7 @@ class RobotLocalPlannerNodeBase : public rclcpp::Node {
 void RunNode(const std::shared_ptr<RobotLocalPlannerNodeBase>& node);
 
 
-/// @brief Robot Local Planner implemented in Ros Action
+/// @brief Robot Local Planner with each component implemented in ROS Action
 class RobotLocalPlannerNodeWithAction : public RobotLocalPlannerNodeBase {
  public:
   RobotLocalPlannerNodeWithAction();
@@ -168,7 +168,6 @@ class RobotLocalPlannerNodeWithAction : public RobotLocalPlannerNodeBase {
   PlanResult PlanImpl(
       const std::optional<tmc_manipulation_types::TimedRobotTrajectory>& previous_trajectory,
       const tmc_manipulation_types::RobotState& initial_state,
-      const std::vector<std::string>& ignore_joints,
       const RobotLocalGoal& constraints) override;
 
  private:
@@ -177,7 +176,7 @@ class RobotLocalPlannerNodeWithAction : public RobotLocalPlannerNodeBase {
 };
 
 
-/// Robot Local Planner that reads plug -ins of each component
+/// Robot Local Planner that loads plugins for each component
 class RobotLocalPlannerNodeWithPlugin : public RobotLocalPlannerNodeBase {
  public:
   RobotLocalPlannerNodeWithPlugin();
@@ -191,7 +190,6 @@ class RobotLocalPlannerNodeWithPlugin : public RobotLocalPlannerNodeBase {
   PlanResult PlanImpl(
       const std::optional<tmc_manipulation_types::TimedRobotTrajectory>& previous_trajectory,
       const tmc_manipulation_types::RobotState& initial_state,
-      const std::vector<std::string>& ignore_joints,
       const RobotLocalGoal& constraints) override;
 
  private:

@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2024 TOYOTA MOTOR CORPORATION
+Copyright (c) 2025 TOYOTA MOTOR CORPORATION
 All rights reserved.
 Redistribution and use in source and binary forms, with or without
 modification, are permitted (subject to the limitations in the disclaimer
@@ -25,54 +25,47 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
-/// @brief Transformation functions for preprocessing and postprocessing optimization
-#ifndef HSRB_QUICK_PATH_OPTIMIZER_TRAJECTORY_FILTER_ADAPTER_HPP_
-#define HSRB_QUICK_PATH_OPTIMIZER_TRAJECTORY_FILTER_ADAPTER_HPP_
+#ifndef HSRB_ROBOT_LOCAL_PLANNER_NODE_JOINT_TRAJECTORIES_PUBLISHER_HPP
+#define HSRB_ROBOT_LOCAL_PLANNER_NODE_JOINT_TRAJECTORIES_PUBLISHER_HPP
 
 #include <memory>
-#include <tmc_timeopt/quick_trajectory_filter.hpp>
+#include <string>
+#include <vector>
+#include <rclcpp/rclcpp.hpp>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
 
-namespace hsrb_quick_path_optimizer {
+#include <tmc_manipulation_util/joint_trajectory_publisher.hpp>
 
-class ITrajectoryFilterAdapter {
+#include "utils.hpp"
+
+namespace hsrb_robot_local_planner_node {
+
+class JointTrajectoriesPublisher {
  public:
-  using Ptr = std::shared_ptr<ITrajectoryFilterAdapter>;
+  using Ptr = std::shared_ptr<JointTrajectoriesPublisher>;
 
-  virtual ~ITrajectoryFilterAdapter() = default;
+  explicit JointTrajectoriesPublisher(rclcpp::Node::SharedPtr node);
+  ~JointTrajectoriesPublisher() = default;
 
-  // Get joint position at time_from_start
-  virtual Eigen::VectorXd GetPosition(double time_from_start) const = 0;
+  void PublishJointTrajectory(const trajectory_msgs::msg::JointTrajectory& trajectory,
+                              const sensor_msgs::msg::JointState& current_state);
 
-  // Get joint velocity at time_from_start
-  virtual Eigen::VectorXd GetVelocity(double time_from_start) const = 0;
-
-  // Get playback time of the trajectory
-  virtual double GetDuration() const = 0;
-};
-
-class TrajectoryFilterAdapter : public ITrajectoryFilterAdapter {
- public:
-  explicit TrajectoryFilterAdapter(const std::shared_ptr<tmc_timeopt::ITrajectoryFilter>& filter_impl)
-      : filter_impl_(filter_impl) {}
-
-  // Get joint position at time_from_start
-  Eigen::VectorXd GetPosition(double time_from_start) const {
-    return filter_impl_->GetPosition(time_from_start);
+  void PublishBaseTrajectory(const trajectory_msgs::msg::JointTrajectory& trajectory) {
+    base_trajectory_pub_->Publish(trajectory);
+  }
+  std::vector<std::string> base_coordinates() const {
+    return base_trajectory_pub_->joint_names();
   }
 
-  // Get joint velocity at time_from_start
-  Eigen::VectorXd GetVelocity(double time_from_start) const {
-    return filter_impl_->GetVelocity(time_from_start);
-  }
-
-  // Get playback time of the trajectory
-  double GetDuration() const {
-    return filter_impl_->GetDuration();
-  }
+  void PublishStopTrajectory(const tmc_manipulation_types::TimedRobotTrajectory& last_trajectory);
+  void PublishStopTrajectory(const std::vector<std::string>& joint_names, const rclcpp::Time& stamp = rclcpp::Time(0));
+  void PublishBaseStopTrajectory(const rclcpp::Time& stamp = rclcpp::Time(0));
 
  private:
-  std::shared_ptr<tmc_timeopt::ITrajectoryFilter> filter_impl_;
+  std::vector<tmc_manipulation_util::JointTrajectoryPublisher::Ptr> joint_trajectory_pubs_;
+  tmc_manipulation_util::JointTrajectoryPublisher::Ptr base_trajectory_pub_;
 };
 
-}  // namespace hsrb_quick_path_optimizer
-#endif  // HSRB_QUICK_PATH_OPTIMIZER_TRAJECTORY_FILTER_ADAPTER_HPP_
+}  // namespace hsrb_robot_local_planner_node
+
+#endif  // HSRB_ROBOT_LOCAL_PLANNER_NODE_JOINT_TRAJECTORIES_PUBLISHER_HPP

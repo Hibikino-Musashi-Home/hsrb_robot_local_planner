@@ -25,7 +25,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
-/// @brief A group of functions that acquire optimization parameters
+/// @brief Function group to obtain optimization parameters
 
 #include "joint_limit.hpp"
 
@@ -36,8 +36,8 @@ DAMAGE.
 #include <tmc_utils/parameters.hpp>
 
 namespace {
-// The bogie joint name after HSR-B is fixed ODOM_X/Y/T
-// You can change it with a parameter, but you can't think of a change case, so go with a constant.
+// The names of the cart joints from HSR-B onwards are fixed as odom_x/y/t
+// It could be made changeable via parameters, but since I can't think of any cases where it would be changed, I'll go with constants
 const std::vector<std::string> kOdomJoints = {"odom_x", "odom_y", "odom_t"};
 }  // namespace
 
@@ -48,7 +48,7 @@ bool GetLimit(const rclcpp::Node::SharedPtr& node,
               const std::vector<std::string>& joint_names,
               Eigen::VectorXd& dst_limit) {
   dst_limit.resize(joint_names.size() + kOdomJoints.size());
-  // Matched the config on TMC/HSRB_Timeopt_ros
+  // Aligning with the writing style of tmc/hsrb_timeopt_ros config
   for (uint32_t i = 0; i < joint_names.size(); ++i) {
     dst_limit[i] = tmc_utils::GetParameter(node, joint_names[i] + "." + type_name, -1.0);
     if (dst_limit[i] < std::numeric_limits<double>::min()) {
@@ -67,14 +67,14 @@ bool GetLimit(const rclcpp::Node::SharedPtr& node,
   return true;
 }
 
-// Get the speed limit
+// Obtain speed limit
 bool GetVelocityLimit(const rclcpp::Node::SharedPtr& node,
                       const std::vector<std::string>& joint_names,
                       Eigen::VectorXd& dst_limit) {
     return GetLimit(node, "velocity", joint_names, dst_limit);
 }
 
-// Get acceleration limit
+// Obtain acceleration limit
 bool GetAccelerationLimit(const rclcpp::Node::SharedPtr& node,
                           const std::vector<std::string>& joint_names,
                           Eigen::VectorXd& dst_limit) {

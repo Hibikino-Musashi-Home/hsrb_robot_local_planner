@@ -1,0 +1,19 @@
+<package format="3">
+  <name>hsrb_robot_local_planner</name>
+  <version>2.0.0</version>
+  <description>Packages related to robot local planner for HSR-B.</description>
+  <maintainer email="xr-hsr-support@mail.toyota.co.jp">HSR Support</maintainer>
+
+  <license>BSD 3-clause Clear License</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>hsrb_quick_path_optimizer</exec_depend>
+  <exec_depend>hsrb_rlp_interface_py</exec_depend>
+  <exec_depend>hsrb_robot_local_planner_node</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+
+</package>

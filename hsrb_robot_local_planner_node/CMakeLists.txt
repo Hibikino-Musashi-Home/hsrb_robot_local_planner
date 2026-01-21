@@ -23,7 +23,7 @@ find_package(tmc_utils REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 
 add_library(${PROJECT_NAME}_lib
-  src/${PROJECT_NAME}/hsrb_joint_trajectories_publisher.cpp
+  src/${PROJECT_NAME}/joint_trajectories_publisher.cpp
   src/${PROJECT_NAME}/node.cpp
   src/${PROJECT_NAME}/utils.cpp
 )

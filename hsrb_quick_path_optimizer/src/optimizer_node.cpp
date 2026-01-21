@@ -25,7 +25,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
-/// @brief Node that provides time optimization action for HSR-B or later
+/// @brief Node providing time-optimized actions for HSR-B and later
 
 #include "optimizer_node.hpp"
 
@@ -52,18 +52,18 @@ DAMAGE.
 #include "ThreadPool.h"
 
 namespace {
-// HSR bogie turning axis name
+// HSR's cart turning axis name
 const char* const kBaseRollJointName = "base_roll_joint";
 // HSR's right wheel axis name
 const char* const kBaseRightWheelJointName = "base_r_drive_wheel_joint";
-// HSR's left vehicle axis name
+// HSR's left wheel axis name
 const char* const kBaseLeftWheelJointName = "base_l_drive_wheel_joint";
-// Trolleys
+// Number of cart joints
 constexpr uint32_t kBaseJointNum = 3;
-// Default value of the number of threads during multi -thread processing
+// Default value for the number of threads in multi-thread processing
 constexpr int32_t kDefaultThreadPoolSize = 8;
 
-// Default value of track sampling interval after optimization [SEC]
+// Default value for the optimized trajectory sampling interval [sec]
 constexpr double kDefaultSamplingIntervalSec = 0.1;
 
 template<typename Type>
@@ -100,13 +100,14 @@ bool ValidateTransformsSize(
   return true;
 }
 
-bool VaidateRobotTrajectoy(const moveit_msgs::msg::RobotTrajectory& trajectory) {
-  if (trajectory.joint_trajectory.joint_names.empty() ||
-      !ValidatePositionsSize(trajectory.joint_trajectory.points,
-                             trajectory.joint_trajectory.joint_names.size()) ||
-      !ValidateSize(trajectory.joint_trajectory.points.front().velocities,
-                    trajectory.joint_trajectory.joint_names.size())) {
-    return false;
+bool ValidateRobotTrajectory(const moveit_msgs::msg::RobotTrajectory& trajectory) {
+  if (!trajectory.joint_trajectory.joint_names.empty()) {
+    if (!ValidatePositionsSize(trajectory.joint_trajectory.points,
+                               trajectory.joint_trajectory.joint_names.size()) ||
+        !ValidateSize(trajectory.joint_trajectory.points.front().velocities,
+                      trajectory.joint_trajectory.joint_names.size())) {
+      return false;
+    }
   }
   if (!ValidateSize(trajectory.multi_dof_joint_trajectory.joint_names, 1) ||
       !ValidateTransformsSize(trajectory.multi_dof_joint_trajectory.points,
@@ -115,10 +116,16 @@ bool VaidateRobotTrajectoy(const moveit_msgs::msg::RobotTrajectory& trajectory) 
                     trajectory.multi_dof_joint_trajectory.joint_names.size())) {
     return false;
   }
-  if (trajectory.joint_trajectory.points.size() < 2 ||
-      !ValidateSize(trajectory.joint_trajectory.points,
-                    trajectory.multi_dof_joint_trajectory.points)) {
-    return false;
+  if (trajectory.joint_trajectory.joint_names.empty()) {
+    if (trajectory.multi_dof_joint_trajectory.points.size() < 2) {
+      return false;
+    }
+  } else {
+    if (trajectory.joint_trajectory.points.size() < 2 ||
+        !ValidateSize(trajectory.joint_trajectory.points,
+                      trajectory.multi_dof_joint_trajectory.points)) {
+      return false;
+    }
   }
   return true;
 }
@@ -143,7 +150,7 @@ double ExtractJointVelocity(const sensor_msgs::msg::JointState& joint_state,
 }
 
 Eigen::Vector3d ExtractBaseJointVelocities(const sensor_msgs::msg::JointState& joint_state) {
-  // According to hsrb_base_controllers :: OmnibaseJointid, right wheels, left wheels, turnings
+  // According to hsrb_base_controllers::OmniBaseJointID, in the order of right wheel, left wheel, turning
   return Eigen::Vector3d(
       ExtractJointVelocity(joint_state, kBaseRightWheelJointName),
       ExtractJointVelocity(joint_state, kBaseLeftWheelJointName),
@@ -151,8 +158,8 @@ Eigen::Vector3d ExtractBaseJointVelocities(const sensor_msgs::msg::JointState& j
 }
 
 double ComputeBaseDirection(const tmc_manipulation_types::TimedMultiDOFJointTrajectory& base_trajectory) {
-  // If you have the initial speed, it is correct to calculate the speed and acceleration direction considering it.
-  // However, since HSR worked without considering, I will give priority to the calculation speed and go with this implementation.
+  // When there is an initial velocity, it is correct to calculate the direction of velocity and acceleration considering it
+  // However, since it worked with HSR even without considering it, prioritize calculation speed and proceed with this implementation
   auto diff_x = base_trajectory.points.at(1).transforms.front().translation().x()
               - base_trajectory.points.at(0).transforms.front().translation().x();
   auto diff_y = base_trajectory.points.at(1).transforms.front().translation().y()
@@ -161,8 +168,8 @@ double ComputeBaseDirection(const tmc_manipulation_types::TimedMultiDOFJointTraj
 }
 
 void UpdateLimits(Eigen::VectorXd& current, const Eigen::Vector3d& calculated) {
-  // Loosen only when the speed / acceleration limit is reduced,
-  // The premise that the target restriction is written at the end
+  // Only relax the speed and acceleration limits when permissible
+  // Assuming the target limit is written at the end
   for (uint32_t i = 0; i < kBaseJointNum; ++i) {
     current.tail(kBaseJointNum)[i] = std::max(current.tail(kBaseJointNum)[i], calculated[i]);
   }
@@ -171,7 +178,7 @@ void UpdateLimits(Eigen::VectorXd& current, const Eigen::Vector3d& calculated) {
 
 namespace hsrb_quick_path_optimizer {
 
-// Speed ​​/ acceleration limit
+// Speed and acceleration limits
 struct JointLimit {
   Eigen::VectorXd max_velocities;
   Eigen::VectorXd max_accelerations;
@@ -194,7 +201,7 @@ struct JointLimit {
   }
 };
 
-// Input orbit
+// Input trajectory
 struct InputTrajectory {
   Eigen::VectorXd initial_positions;
   Eigen::VectorXd initial_velocities;
@@ -203,15 +210,17 @@ struct InputTrajectory {
   explicit InputTrajectory(const tmc_manipulation_types::TimedRobotTrajectory& trajectory) {
     ExtractInitialPositions(trajectory, initial_positions);
     ExtractInitialVelocities(trajectory, initial_velocities);
-    // To extract the first point as Initial_*, it is necessary to eliminate the first point.
-    // In order to make the input a CONST, it is necessary to copy and delete it,
-    // Then it should be lighter to erase the first point after converting it to Vector.
+    // To extract the first point as initial_*, processing to omit the first point is necessary
+    // To make the input const, copying and deleting is necessary,
+    // In that case, converting to a vector and then removing the first point should be lighter processing
     ConvertToWayPoints(trajectory, way_points);
     way_points.erase(way_points.begin());
   }
 };
 
 void OptimizerPluginCommon::Initialize(const rclcpp::Node::SharedPtr& node) {
+  node_ = node;
+
   sampling_interval_sec_ = tmc_utils::GetParameter(node, "sampling_interval_sec", kDefaultSamplingIntervalSec);
 
   base_kinematics_ = std::make_shared<BaseKinematics>(BaseJointLimitsRos(node), OmniBaseSizeRos(node));
@@ -236,7 +245,7 @@ void OptimizerPluginCommon::Initialize(const rclcpp::Node::SharedPtr& node) {
       std::bind(&tmc_utils::DynamicParameter<double>::SetParameterCallback,
                 acceleration_ratio_, std::placeholders::_1)));
 
-  // Consider compatibility so that it does not work by default
+  // Considering compatibility, make it inactive by default
   acceleration_rate_for_stop_ = std::make_shared<tmc_utils::DynamicParameter<double>>(
       node, "acceleration_rate_for_stop", 0.0);
   set_param_handlers_.emplace_back(node->add_on_set_parameters_callback(
@@ -251,6 +260,12 @@ bool OptimizerPluginCommon::Reset() {
                    + std::chrono::nanoseconds(static_cast<int64_t>(optimize_timeout_->value() * 1.0e9));
     return true;
   } else {
+    if (!joint_state_) {
+      RCLCPP_ERROR(node_->get_logger(), "Joint state is not available.");
+    }
+    if (!odom_) {
+      RCLCPP_ERROR(node_->get_logger(), "Odometry is not available.");
+    }
     return false;
   }
 }
@@ -347,7 +362,7 @@ bool OptimizerPlugin::Optimize(const tmc_manipulation_types::TimedRobotTrajector
   std::vector<tmc_manipulation_types::TimedRobotTrajectory> trajectories_out;
   const auto result = Optimize({trajectory_in}, interrupt, trajectories_out);
   if (result) {
-    // If Result is true, there is always the first orbit
+    // If result is true, there is always the first trajectory
     auto min_index = 0;
     for (auto i = 1; i < trajectories_out.size(); ++i) {
       if (trajectories_out[i].joint_trajectory.points.back().time_from_start <
@@ -376,7 +391,7 @@ bool OptimizerPlugin::Optimize(const std::vector<tmc_manipulation_types::TimedRo
     return false;
   }
 
-  // [0] is always there because the empty judgment is done first
+  // Since an empty check is performed first, [0] is always present
   auto joint_limit = JointLimit(node_, trajectories_in[0].joint_trajectory.joint_names);
   if (!joint_limit.IsValid()) {
     return false;
@@ -390,7 +405,7 @@ bool OptimizerPlugin::Optimize(const std::vector<tmc_manipulation_types::TimedRo
       common_.Optimize(interrupt, input_trajectory, joint_limit),
       common_.OptimizeViaStop(interrupt, input_trajectory, joint_limit)};
 
-    for (const auto trajectory_impl : trajectory_candidates) {
+    for (const auto& trajectory_impl : trajectory_candidates) {
       if (!trajectory_impl) {
         continue;
       }
@@ -441,7 +456,7 @@ bool OptimizerPluginMultiThread::Optimize(
     return false;
   }
 
-  // [0] is always there because the empty judgment is done first
+  // Since an empty check is performed first, [0] is always present
   auto joint_limit = JointLimit(node_, trajectories_in[0].joint_trajectory.joint_names);
   if (!joint_limit.IsValid()) {
     return false;
@@ -467,7 +482,8 @@ bool OptimizerPluginMultiThread::Optimize(
   for (auto& future : trajectory_futures) {
     future.wait();
     const auto trajectory = future.get();
-    if (!trajectory.joint_trajectory.joint_names.empty()) {
+    if (!trajectory.joint_trajectory.joint_names.empty() ||
+        !trajectory.multi_dof_joint_trajectory.joint_names.empty()) {
       trajectories_out.emplace_back(trajectory);
     }
   }
@@ -477,7 +493,7 @@ bool OptimizerPluginMultiThread::Optimize(
 tmc_manipulation_types::TimedRobotTrajectory OptimizerPluginMultiThread::OptimizeImpl(
     std::function<ITrajectoryFilterAdapter::Ptr(const InputTrajectory&)> optimize_func,
     const tmc_manipulation_types::TimedRobotTrajectory& trajectory_in) {
-  // The conversion to inputTrajectory is wasteful, but I don't want to have a joint name for Convert
+  // It's a waste to convert to InputTrajectory, but joint names are needed for conversion, so it can't be helped
   auto trajectory_impl = optimize_func(InputTrajectory(trajectory_in));
   if (!trajectory_impl) {
     return tmc_manipulation_types::TimedRobotTrajectory();
@@ -513,7 +529,7 @@ void OptimizerNode::Initialize() {
 rclcpp_action::GoalResponse OptimizerNode::GoalCallback(
     const rclcpp_action::GoalUUID& uuid,
     std::shared_ptr<const tmc_planning_msgs::action::OptimizeRobotTrajectory::Goal> goal) {
-  if (!VaidateRobotTrajectoy(goal->robot_trajectory)) {
+  if (!ValidateRobotTrajectory(goal->robot_trajectory)) {
     return rclcpp_action::GoalResponse::REJECT;
   }
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;

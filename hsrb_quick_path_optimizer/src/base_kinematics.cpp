@@ -25,7 +25,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
-/// @brief Athletic for acceleration calculation in bogies after HSR-B
+/// @brief Kinematics for acceleration calculation in carts from HSR-B onwards
 
 #include "base_kinematics.hpp"
 
@@ -37,12 +37,12 @@ DAMAGE.
 #include <vector>
 
 namespace {
-// Number of steps for searching
-// If it is 50, it will be about 0.1 [MSEC] for Core i5-8350U CPU 1.70GHz.
+// Number of steps for exploration
+// With 50, it becomes approximately 0.1[msec] on Core i5-8350U CPU 1.70GHz
 constexpr int32_t kSteps = 50;
 
 void GenerateCandidates(double limit, std::vector<std::tuple<double, double>>& dst_candidates) {
-  // As you only need to search only the limit of the limit, prepare the search range in advance.
+  // Since only the edge of the limit needs to be explored, prepare the exploration range in advance
   for (int32_t i = -kSteps + 1; i < kSteps; ++i) {
     const double value = limit * static_cast<double>(i) / kSteps;
     dst_candidates.push_back(std::make_tuple(limit, value));
@@ -78,7 +78,7 @@ OmniBaseSize::OmniBaseSize() {
   this->wheel_radius = 0.04;
 }
 
-// constructor
+// Constructor
 BaseKinematics::BaseKinematics(const BaseJointLimits& joint_limits,
                                const OmniBaseSize& omni_base_size)
     : joint_limits_(joint_limits), omni_base_size_(omni_base_size) {
@@ -106,10 +106,10 @@ struct JacobianImpl {
       : JacobianImpl(size, base_roll_joint, Eigen::Vector3d::Zero()) {}
 
   JacobianImpl(const OmniBaseSize& size, double base_roll_joint, const Eigen::Vector3d& joint_velocities) {
-    // Calculate the necessary elements of jacobian
-    // See the following paper for the HSR bogie mechanism
+    // Calculate necessary elements of the Jacobian
+    // For the cart mechanism of HSR, refer to the following paper
     // https://www.jstage.jst.go.jp/article/jrsj/27/3/27_3_314/_pdf
-    // It is also summarized in doc/base_kinematics.pdf only for jacobian
+    // The Jacobian is also summarized in doc/base_kinematics.pdf
     const double r = size.wheel_radius;
     const double s = size.caster_offset;
     const double w = size.tread;
@@ -151,16 +151,16 @@ Eigen::Vector3d BaseKinematics::CalculateBaseMaxVelocity(
       joint_velocities[kJointIDLeftWheel] = std::get<1>(point);
     }
   }
-  // Derivation of the turning axial speed
+  // Derivation of turning axis speed
   double yaw_velocity = joint_velocities[kJointIDRightWheel] * jacobian.wheel_rate -
                         joint_velocities[kJointIDLeftWheel] * jacobian.wheel_rate;
-  // Enter the direction you are aiming for the YAW axis, and the branch is correct accordingly.
-  // However, if it is HSR, it will move alone, so I will try it with this
+  // Receive the intended direction of the yaw axis as input, and implement branching accordingly
+  // However, since it seems to work with just this for HSR, let's try it
   yaw_velocity =
       std::min(std::fabs(yaw_velocity - joint_limits_.caster_velocity),
                std::fabs(yaw_velocity + joint_limits_.caster_velocity));
 
-  // Return to Origin coordinates and output
+  // Return to origin coordinates and output
   const Eigen::Matrix3d origin_to_base =
       Eigen::AngleAxisd(origin_to_base_yaw, Eigen::Vector3d::UnitZ())
           .toRotationMatrix();
@@ -173,13 +173,13 @@ Eigen::Vector3d BaseKinematics::CalculateBaseMaxVelocity(
 }
 
 
-// Calculate the maximum acceleration when going in the target direction considering the current bogie state
+// Calculate the maximum acceleration when moving towards the target direction, considering the current cart state
 Eigen::Vector3d BaseKinematics::CalculateBaseMaxAcceleration(
     double origin_to_base_yaw, double origin_to_target_direction,
     double base_roll_joint, const Eigen::Vector3d& joint_velocities) const {
   const auto jacobian = JacobianImpl(omni_base_size_, base_roll_joint, joint_velocities);
 
-  // Search for wheel acceleration that is closest to the target direction
+  // Search for wheel acceleration closest to the target direction
   const auto direction_local = origin_to_target_direction - origin_to_base_yaw;
   double angle_distance = std::numeric_limits<double>::max();
   Eigen::Vector3d joint_acceleration;
@@ -198,13 +198,13 @@ Eigen::Vector3d BaseKinematics::CalculateBaseMaxAcceleration(
   // Derivation of turning axis acceleration
   double yaw_acceleration = joint_acceleration[kJointIDRightWheel] * jacobian.wheel_rate -
                             joint_acceleration[kJointIDLeftWheel] * jacobian.wheel_rate;
-  // Enter the direction you are aiming for the YAW axis, and the branch is correct accordingly.
-  // However, if it is HSR, it will move alone, so I will try it with this
+  // Receive the intended direction of the yaw axis as input, and implement branching accordingly
+  // However, since it seems to work with just this for HSR, let's try it
   yaw_acceleration =
       std::min(std::fabs(yaw_acceleration - joint_limits_.caster_acceleration),
                std::fabs(yaw_acceleration + joint_limits_.caster_acceleration));
 
-  // Return to Origin coordinates and output
+  // Return to origin coordinates and output
   const Eigen::Matrix3d origin_to_base =
       Eigen::AngleAxisd(origin_to_base_yaw, Eigen::Vector3d::UnitZ())
           .toRotationMatrix();

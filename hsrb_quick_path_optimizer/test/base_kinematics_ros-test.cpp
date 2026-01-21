@@ -25,7 +25,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
-/// @brief A parameter class test for bogie athletic calculation after HSR-B
+/// @brief Test of the parameter class for cart kinematics calculation for HSR-B and later
 
 #include <string>
 #include <vector>

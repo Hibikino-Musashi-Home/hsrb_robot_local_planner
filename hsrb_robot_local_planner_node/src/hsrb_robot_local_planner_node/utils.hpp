@@ -52,27 +52,13 @@ DAMAGE.
 
 namespace hsrb_robot_local_planner_node {
 
-struct HsrbJointNames {
-  // head joint name
-  tmc_manipulation_types::NameSeq head_joints;
-  // arm joint name
-  tmc_manipulation_types::NameSeq arm_joints;
-  // hand joint name
-  tmc_manipulation_types::NameSeq hand_joints;
-  // base joint name
-  tmc_manipulation_types::NameSeq base_coordinates;
-};
-
 struct RobotLocalGoal {
   std::string id;
   tmc_robot_local_planner::Constraints constraints;
-  // I don't think it's very good, but I sometimes use the constraints ROS message directly.
+  // I don't think it's very good, but sometimes we use the constraints ROS message directly, so we'll keep it
   tmc_planning_msgs::msg::Constraints constraints_msg;
 
   double normalized_velocity;
-  bool enable_arm;
-  bool enable_head;
-  bool enable_gripper;
   bool enable_base;
 
   RobotLocalGoal() {}
@@ -86,9 +72,15 @@ class DisplacementChecker {
  public:
   explicit DisplacementChecker(const rclcpp::Node::SharedPtr& node);
 
-  // I'm going to determine if constraints stalled, so I will explicitly update constraints.
+  // Since I plan to determine if the constraints have stalled, I will explicitly update the constraints
   void UpdateConstraints(const tmc_robot_local_planner::Constraints& constraints);
-  bool ShouldComplete(const std::string& id, const tmc_manipulation_types::RobotState& robot_state);
+
+  enum class Result {
+    kInvalidRobotState,
+    kNotComplete,
+    kComplete,
+  };
+  Result ShouldComplete(const std::string& id, const tmc_manipulation_types::RobotState& robot_state);
 
  private:
   pluginlib::ClassLoader<tmc_robot_kinematics_model::IRobotKinematicsModel> fk_loader_;
@@ -116,24 +108,8 @@ class DisplacementChecker {
   std::mutex mutex_;
 };
 
-/// @brief Change the input orbit to HSRB orbit MSG
-/// @param Trajectory input orbit
-/// @param STAMP time stamp
-/// @param head_trajectory_msg head output orbit
-/// @param ARM_TRAJECTORY_MSG Output Orbit
-/// @param Hand_trajectory_msg Hand Output Orbit
-/// @param base_trajectory_msg Base output orbit
-void RobotTrajectoryToHsrbTrajectoryMsg(
-    const tmc_manipulation_types::TimedRobotTrajectory& trajectory,
-    const rclcpp::Time& stamp,
-    const HsrbJointNames& hsrb_joint_names,
-    trajectory_msgs::msg::JointTrajectory& head_trajectory_msg,
-    trajectory_msgs::msg::JointTrajectory& arm_trajectory_msg,
-    trajectory_msgs::msg::JointTrajectory& hand_trajectory_msg,
-    trajectory_msgs::msg::JointTrajectory& base_trajectory_msg);
-
-/// @brief Take out Robotstate from Robotstate with a time stamp
-/// @param State with time stamp ROBOTSTATE
+/// @brief Extract RobotState from timestamped RobotState
+/// @param state Timestamped RobotState
 /// @return Robotstate
 tmc_manipulation_types::RobotState ConvertRobotStateStampedToRobotState(
     const tf2::Stamped<tmc_manipulation_types::RobotState>& state);
@@ -145,12 +121,17 @@ std::optional<tmc_manipulation_types::TimedRobotTrajectory> GetPreviousTrajector
 
 tf2::TimePoint ConvertToTf2(const rclcpp::Time& stamp);
 
+enum class RobotLocalPlannerErrorCodeLocal {
+  kInvalidInputRobotState,
+};
+
 class RobotLocalPlannerStatusPublisher {
  public:
   explicit RobotLocalPlannerStatusPublisher(const rclcpp::Node::SharedPtr& node);
 
   void UpdateConstraintsStatus(const std::string& name, int32_t status);
   void Publish(tmc_robot_local_planner::RobotLocalPlannerErrorCode error_code);
+  void Publish(RobotLocalPlannerErrorCodeLocal error_code);
 
  private:
   rclcpp::Clock::SharedPtr clock_;
@@ -160,6 +141,8 @@ class RobotLocalPlannerStatusPublisher {
   std::vector<tmc_planning_msgs::msg::ConstraintsStatus> constraints_statuses_;
 
   std::mutex mutex_;
+
+  void PublishImpl_(int32_t error_code);
 };
 
 }  // namespace hsrb_robot_local_planner_node

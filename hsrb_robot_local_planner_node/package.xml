@@ -5,9 +5,8 @@
 
   <maintainer email="xr-hsr-support@mail.toyota.co.jp">HSR Support</maintainer>
 
-  <author>Keisuke Takeshita</author>
-  <author>Satoru Onoda</author>
-  <author>Yuta Watanabe</author>
+  <author email="yuta_watanabe_af@mail.toyota.co.jp">Yuta Watanabe</author>
+  <author email="satoru_onoda_zc@mail.toyota.co.jp">Satoru Onoda</author>
 
   <license>BSD 3-clause Clear License</license>
 

@@ -25,7 +25,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
-/// @brief Profile for optimization and conversion functions for post -processing
+/// @brief Transformation function group for preprocessing and postprocessing of optimization
 #ifndef HSRB_QUICK_PATH_OPTIMIZER_CONVERSIONS_HPP_
 #define HSRB_QUICK_PATH_OPTIMIZER_CONVERSIONS_HPP_
 
@@ -42,21 +42,21 @@ DAMAGE.
 
 namespace hsrb_quick_path_optimizer {
 
-// The consistency check of the input orbit is performed separately
+// It is assumed that the consistency check of the input trajectory is performed separately
 
-// Extracting the initial position, only for HSR-B
+// Extract initial position, dedicated for HSR-B and later
 void ExtractInitialPositions(const tmc_manipulation_types::TimedRobotTrajectory& trajectory,
                              Eigen::VectorXd& dst_positions);
 
-// Extracting the initial speed, exclusively after HSR-B
+// Extract initial velocity, dedicated for HSR-B and later
 void ExtractInitialVelocities(const tmc_manipulation_types::TimedRobotTrajectory& trajectory,
                               Eigen::VectorXd& dst_velocities);
 
-// Convert trajectory to molds for optimization
+// Convert trajectory to type for input to optimization
 void ConvertToWayPoints(const tmc_manipulation_types::TimedRobotTrajectory& trajectory,
                         std::vector<Eigen::VectorXd>& dst_way_points);
 
-// Remove the optimization result for each Sampling_step [SEC] and convert it to a ROS message.
+// Extract optimization results at each sampling_step[sec] and convert to ROS message
 void ConvertToRobotTrajectory(const ITrajectoryFilterAdapter::Ptr& filter,
                               const std::vector<std::string>& joint_names,
                               const std::string& base_joint_name,

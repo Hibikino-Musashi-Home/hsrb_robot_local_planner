@@ -25,7 +25,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
-/// @brief Node that provides time optimization action for HSR-B or later
+/// @brief Node providing time-optimized actions for HSR-B and later
 #ifndef HSRB_QUICK_PATH_OPTIMIZER_OPTIMIZER_NODE_HPP_
 #define HSRB_QUICK_PATH_OPTIMIZER_OPTIMIZER_NODE_HPP_
 
@@ -77,10 +77,12 @@ class OptimizerPluginCommon {
   double sampling_interval_sec() const { return sampling_interval_sec_; }
 
  private:
+  rclcpp::Node::SharedPtr node_;
+
   BaseKinematics::Ptr base_kinematics_;
 
-  // Currently for information acquisition
-  // It is better to synchronize strictly, but I do not care because it is a topic that should appear on a high period.
+  // Subscribers for obtaining current information
+  // Strictly speaking, synchronization is better, but since the topic should be published at a high frequency, it is not a concern
   void JointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   sensor_msgs::msg::JointState::SharedPtr joint_state_;
@@ -121,8 +123,8 @@ class OptimizerPlugin : public tmc_robot_local_planner::IOptimizer {
 
   rclcpp::Node::SharedPtr node_;
 
-  // For true, make RESULT for forcibly Succeeded
-  // Settings to keep the operation even when the input orbital is not optimal but does not have time, even in the event of an optimization failure.
+  // If true, force Result to Succeeded
+  // Setting to continue operation even if optimization fails when the input trajectory contains non-optimal time
   bool is_force_succeeded_;
 };
 
@@ -159,7 +161,7 @@ class OptimizerNode : public rclcpp::Node {
   explicit OptimizerNode(const rclcpp::NodeOptions& options);
   virtual ~OptimizerNode() = default;
 
-  // I want to do Shared_from_this, so initialize after instance generation
+  // Want to use shared_from_this, so initialize after instance creation
   void Initialize();
 
  private:

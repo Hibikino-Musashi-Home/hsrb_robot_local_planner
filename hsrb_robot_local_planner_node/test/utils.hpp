@@ -44,10 +44,11 @@ namespace hsrb_robot_local_planner_node {
 
 tmc_planning_msgs::msg::RangeJointConstraint GenerateRangeJointConstraint() {
   tmc_planning_msgs::msg::RangeJointConstraint rjc;
+  // TODO(Takeshita) ここをodomにすることでtfでの変換を飛ばしている，テストしたいなら頑張ること
   rjc.header.frame_id = "odom";
-  // RobotlocalplannerNodebase :: Generateinitialstate () is in the order of Arm, Hand, HEAD, so keep it in
+  // In RobotLocalPlannerNodeBase::GenerateInitialState(), the order is arm, hand, head, so let's align with that.
   rjc.min.joint_state.name = {"arm_lift_joint", "arm_flex_joint", "arm_roll_joint", "wrist_flex_joint",
-                               "wrist_roll_joint", "hand_motor_joint", "head_pan_joint", "head_tilt_joint"};
+                              "wrist_roll_joint", "hand_motor_joint", "head_pan_joint", "head_tilt_joint"};
   rjc.min.joint_state.position = {0.0, -1.57, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
   rjc.min.multi_dof_joint_state.joint_names = {"world_joint"};
   geometry_msgs::msg::Transform transform;
@@ -56,6 +57,49 @@ tmc_planning_msgs::msg::RangeJointConstraint GenerateRangeJointConstraint() {
   rjc.max = rjc.min;
   return rjc;
 }
+
+tmc_planning_msgs::msg::RangeJointConstraint RemoveJointFromRangeJointConstraint(
+    const tmc_planning_msgs::msg::RangeJointConstraint& rjc,
+    const std::string& joint_name) {
+  tmc_planning_msgs::msg::RangeJointConstraint new_rjc = rjc;
+
+  auto remove_joint = [&](sensor_msgs::msg::JointState& joint_state) {
+    auto it = std::find(joint_state.name.begin(), joint_state.name.end(), joint_name);
+    if (it != joint_state.name.end()) {
+      auto index = std::distance(joint_state.name.begin(), it);
+      joint_state.name.erase(it);
+      joint_state.position.erase(joint_state.position.begin() + index);
+    }
+  };
+  remove_joint(new_rjc.min.joint_state);
+  remove_joint(new_rjc.max.joint_state);
+
+  return new_rjc;
+}
+
+tmc_planning_msgs::msg::RangeJointConstraint RemoveJointsFromRangeJointConstraint(
+    const tmc_planning_msgs::msg::RangeJointConstraint& rjc,
+    const std::vector<std::string>& joint_names) {
+  tmc_planning_msgs::msg::RangeJointConstraint new_rjc = rjc;
+  for (const auto& joint_name : joint_names) {
+    new_rjc = RemoveJointFromRangeJointConstraint(new_rjc, joint_name);
+  }
+  return new_rjc;
+}
+
+tmc_planning_msgs::msg::RangeJointConstraint UpdateGoalPositionsInRangeJointConstraint(
+    const tmc_planning_msgs::msg::RangeJointConstraint& rjc,
+    const std::string& joint_name,
+    const double& goal_position) {
+  tmc_planning_msgs::msg::RangeJointConstraint new_rjc = rjc;
+  const auto it = std::find(new_rjc.min.joint_state.name.begin(),
+                            new_rjc.min.joint_state.name.end(), joint_name);
+  const auto index = std::distance(new_rjc.min.joint_state.name.begin(), it);
+  new_rjc.min.joint_state.position[index] = goal_position;
+  new_rjc.max.joint_state.position[index] = goal_position;
+  return new_rjc;
+}
+
 
 class RobotLocalPlannerStatusSubscriber {
  public:

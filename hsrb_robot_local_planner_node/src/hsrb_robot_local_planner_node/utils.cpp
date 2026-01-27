@@ -65,6 +65,17 @@ void InsertInitialStateIntoTimedRobotTrajectory(
   inserted_trajectory.joint_trajectory.points.push_front(point);
   inserted_trajectory.multi_dof_joint_trajectory.points.push_front(multi_dof_point);
 }
+
+template <typename T>
+bool IsSubset(const std::vector<T>& A, const std::vector<T>& B) {
+  for (const auto& elem : A) {
+    if (std::find(B.begin(), B.end(), elem) == B.end()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 namespace hsrb_robot_local_planner_node {
@@ -72,16 +83,13 @@ namespace hsrb_robot_local_planner_node {
 RobotLocalGoal::RobotLocalGoal(const tmc_planning_msgs::msg::RobotLocalGoal& msg) {
   id = msg.id;
 
-  // ConvertConstraints assumes that the empty Constraints is an output argument, so it is necessary to initialize.
+  // ConvertConstraints assumes that constraints are empty output arguments, so initialization is necessary
   constraints = tmc_robot_local_planner::Constraints();
   tmc_robot_local_planner_utils::ConvertConstraints(msg.constraints, constraints);
 
   constraints_msg = msg.constraints;
   normalized_velocity = msg.normalized_velocity;
 
-  enable_arm = msg.enable_arm;
-  enable_head = msg.enable_head;
-  enable_gripper = msg.enable_gripper;
   enable_base = msg.enable_base;
 }
 
@@ -95,13 +103,10 @@ bool RobotLocalGoal::IsEmpty() const {
 void RobotLocalGoal::Clear() {
   constraints = tmc_robot_local_planner::Constraints();
 
-  // Empty check => Includes the flow of use in ISEMPTY, but initialize it just in case
+  // Empty check with IsEmpty => The flow of use is assumed, but initialize just in case
   constraints_msg = tmc_planning_msgs::msg::Constraints();
   normalized_velocity = 0.0;
 
-  enable_arm = false;
-  enable_head = false;
-  enable_gripper = false;
   enable_base = false;
 }
 
@@ -143,19 +148,24 @@ void DisplacementChecker::UpdateConstraints(const tmc_robot_local_planner::Const
   previous_link_displacement_ = 1.0e10;
 }
 
-bool DisplacementChecker::ShouldComplete(const std::string& id, const tmc_manipulation_types::RobotState& robot_state) {
+DisplacementChecker::Result DisplacementChecker::ShouldComplete(
+    const std::string& id, const tmc_manipulation_types::RobotState& robot_state) {
   std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
   if (!lock) {
-    return false;
+    return Result::kNotComplete;
   }
 
-  // In order to issue information, it is implemented to calculate Displacements first and then judge.
+  // To issue information, calculate displacements first and then make judgments, as implemented
   tmc_planning_msgs::msg::RobotDisplacements displacements_msg;
   displacements_msg.id = id;
 
   double min_joint_displacement = 1.0e10;
   if (!constraints_.hard_joint_constraints.empty()) {
     for (const auto& joint_constraint : constraints_.hard_joint_constraints) {
+      if (!IsSubset(joint_constraint->GetJointName(), robot_state.joint_state.name)) {
+        RCLCPP_WARN(logger_, "Joint names in constraint are not subset of robot state");
+        return Result::kInvalidRobotState;
+      }
       const auto [disp_pos, disp_pose] = joint_constraint->CalcSeparateDisplacements(robot_state);
 
       tmc_planning_msgs::msg::JointDisplacement joint_displacement;
@@ -195,68 +205,38 @@ bool DisplacementChecker::ShouldComplete(const std::string& id, const tmc_manipu
     }
   }
 
-  // Publish Displacements here
+  // Issue displacements here
   displacements_msg.min_displacement = std::min(min_joint_displacement, min_link_displacement);
   pub_->publish(displacements_msg);
 
-  // Judgment from here
+  // Judgment starts from here
   if (!constraints_.hard_joint_constraints.empty()) {
     if (min_joint_displacement < joint_displacement_threshold_) {
-      return true;
+      return Result::kComplete;
     }
 
     if (min_joint_displacement < joint_stall_check_range_ &&
         std::abs(min_joint_displacement - previous_joint_displacement_) < joint_stall_threshold_) {
       previous_joint_displacement_ = min_joint_displacement;
-      return true;
+      return Result::kComplete;
     }
     previous_joint_displacement_ = min_joint_displacement;
   }
 
   if (!constraints_.hard_link_constraints.empty()) {
     if (min_link_displacement < link_displacement_threshold_) {
-      return true;
+      return Result::kComplete;
     }
 
     if (min_link_displacement < link_stall_check_range_ &&
         std::abs(min_link_displacement - previous_link_displacement_) < link_stall_threshold_) {
       previous_link_displacement_ = min_link_displacement;
-      return true;
+      return Result::kComplete;
     }
     previous_link_displacement_ = min_link_displacement;
   }
 
-  return false;
-}
-
-/// convert robot trajectory to hsr trajectory
-void RobotTrajectoryToHsrbTrajectoryMsg(
-    const tmc_manipulation_types::TimedRobotTrajectory& trajectory,
-    const rclcpp::Time& stamp,
-    const HsrbJointNames& hsrb_joint_names,
-    trajectory_msgs::msg::JointTrajectory& head_trajectory_msg,
-    trajectory_msgs::msg::JointTrajectory& arm_trajectory_msg,
-    trajectory_msgs::msg::JointTrajectory& hand_trajectory_msg,
-    trajectory_msgs::msg::JointTrajectory& base_trajectory_msg) {
-  const auto head_trajectory = tmc_manipulation_types::ExtractPartialJointTrajectory(
-      trajectory.joint_trajectory, hsrb_joint_names.head_joints);
-  tmc_manipulation_types_bridge::TimedJointTrajectoryToJointTrajectoryMsg(head_trajectory, head_trajectory_msg);
-  head_trajectory_msg.header.stamp = stamp;
-
-  const auto arm_trajectory = tmc_manipulation_types::ExtractPartialJointTrajectory(
-      trajectory.joint_trajectory, hsrb_joint_names.arm_joints);
-  tmc_manipulation_types_bridge::TimedJointTrajectoryToJointTrajectoryMsg(arm_trajectory, arm_trajectory_msg);
-  arm_trajectory_msg.header.stamp = stamp;
-
-  const auto hand_trajectory = tmc_manipulation_types::ExtractPartialJointTrajectory(
-      trajectory.joint_trajectory, hsrb_joint_names.hand_joints);
-  tmc_manipulation_types_bridge::TimedJointTrajectoryToJointTrajectoryMsg(hand_trajectory, hand_trajectory_msg);
-  hand_trajectory_msg.header.stamp = stamp;
-
-  const auto base_trajectory = tmc_robot_local_planner_utils::ExtractMultiDOFJointTrajectory(
-      trajectory.multi_dof_joint_trajectory, hsrb_joint_names.base_coordinates);
-  tmc_manipulation_types_bridge::TimedJointTrajectoryToJointTrajectoryMsg(base_trajectory, base_trajectory_msg);
-  base_trajectory_msg.header.stamp = stamp;
+  return Result::kNotComplete;
 }
 
 tmc_manipulation_types::RobotState ConvertRobotStateStampedToRobotState(
@@ -274,11 +254,11 @@ std::optional<tmc_manipulation_types::TimedRobotTrajectory> GetPreviousTrajector
   tmc_manipulation_types::TimedRobotTrajectory extracted_trajectory;
   if (tmc_robot_local_planner_utils::ExtractTrajectoryAtTime(
           previous_trajectory, target_time, extracted_trajectory)) {
-    // 1 Insert the current posture to the top to avoid the set of orbit
+    // Insert the current posture at the beginning to avoid setting a single-point trajectory
     if (extracted_trajectory.joint_trajectory.points.size() == 1) {
       InsertInitialStateIntoTimedRobotTrajectory(initial_state, extracted_trajectory);
     }
-    // Shift the time of startup
+    // Shift the activation time
     tmc_manipulation_types::TimedRobotTrajectory shifted_trajectory;
     tmc_robot_local_planner_utils::ShiftTrajectoryTimes(
         extracted_trajectory, extracted_trajectory.joint_trajectory.points[0].time_from_start,
@@ -315,10 +295,10 @@ RobotLocalPlannerStatusPublisher::RobotLocalPlannerStatusPublisher(const rclcpp:
 void RobotLocalPlannerStatusPublisher::UpdateConstraintsStatus(const std::string& name, int32_t status) {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  // I think it is more efficient to explore in the reverse order, but it should not be a big difference.
+  // Searching in reverse order might be more efficient, but it shouldn't make a big difference
   for (auto& msg : constraints_statuses_) {
     if (msg.id == name) {
-      // Overwriting is prohibited because it is completed
+      // Completed, so overwriting is prohibited
       if (msg.value == tmc_planning_msgs::msg::ConstraintsStatus::SATISFIED ||
           msg.value == tmc_planning_msgs::msg::ConstraintsStatus::PREEMPTED ||
           msg.value == tmc_planning_msgs::msg::ConstraintsStatus::EMPTY) {
@@ -337,11 +317,28 @@ void RobotLocalPlannerStatusPublisher::UpdateConstraintsStatus(const std::string
 }
 
 void RobotLocalPlannerStatusPublisher::Publish(tmc_robot_local_planner::RobotLocalPlannerErrorCode error_code) {
+  PublishImpl_(error_code_map_.at(error_code));
+}
+
+void RobotLocalPlannerStatusPublisher::Publish(RobotLocalPlannerErrorCodeLocal error_code) {
+  int32_t code;
+  switch (error_code) {
+    case RobotLocalPlannerErrorCodeLocal::kInvalidInputRobotState:
+      code = tmc_planning_msgs::msg::RobotLocalPlannerStatus::INVALID_INPUT_ROBOT_STATE;
+      break;
+    default:
+      code = -999;
+      break;
+  }
+  PublishImpl_(code);
+}
+
+void RobotLocalPlannerStatusPublisher::PublishImpl_(int32_t error_code) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   const auto current = clock_->now();
   for (auto it = constraints_statuses_.begin(); it != constraints_statuses_.end(); ) {
-    // 10 seconds is appropriate, but there seems to be no request to make it a modified parameter, so I will go with this implementation.
+    // 10 seconds is arbitrary, but there doesn't seem to be a request to make it a changeable parameter, so we'll go with this implementation
     if ((current - it->last_updated_stamp) > rclcpp::Duration(10, 0)) {
       it = constraints_statuses_.erase(it);
     } else {
@@ -351,7 +348,7 @@ void RobotLocalPlannerStatusPublisher::Publish(tmc_robot_local_planner::RobotLoc
 
   tmc_planning_msgs::msg::RobotLocalPlannerStatus status_msg;
   status_msg.header.stamp = current;
-  status_msg.planner_status = error_code_map_.at(error_code);
+  status_msg.planner_status = error_code;
   status_msg.constraints_statuses = constraints_statuses_;
   pub_->publish(status_msg);
 }

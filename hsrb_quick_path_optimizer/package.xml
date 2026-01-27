@@ -1,7 +1,7 @@
 <package format="3">
   <name>hsrb_quick_path_optimizer</name>
   <version>2.0.0</version>
-  <description> Optimize local trajectory </description>
+  <description>Optimize local trajectory</description>
   <maintainer email="xr-hsr-support@mail.toyota.co.jp">HSR Support</maintainer>
   <license>BSD 3-clause Clear License</license>
   <buildtool_depend>ament_cmake</buildtool_depend>

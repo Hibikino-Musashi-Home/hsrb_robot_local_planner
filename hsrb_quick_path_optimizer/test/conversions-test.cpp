@@ -25,7 +25,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
-/// @brief Test of conversion functions for optimization pretreatment and post -processing
+/// @brief Test of transformation functions for preprocessing and postprocessing of optimization
 
 #include <vector>
 
@@ -43,8 +43,23 @@ namespace {
 
 constexpr double kEpsilon = 1.0e-6;
 
-tmc_manipulation_types::TimedRobotTrajectory GenerateValidRobotTrajectory() {
+tmc_manipulation_types::TimedRobotTrajectory GenerateMultiDOFOnlyRobotTrajectory() {
   tmc_manipulation_types::TimedRobotTrajectory trajectory;
+  trajectory.multi_dof_joint_trajectory.points.resize(2);
+  trajectory.multi_dof_joint_trajectory.points[0].transforms.push_back(
+      Eigen::Translation3d(9.0, 10.0, 0.0) * Eigen::AngleAxisd(0.2, Eigen::Vector3d::UnitZ()));
+  trajectory.multi_dof_joint_trajectory.points[0].velocities.resize(1);
+  trajectory.multi_dof_joint_trajectory.points[0].velocities[0] << 11.0, 12.0, 0.0, 0.0, 0.0, 13.0;
+  trajectory.multi_dof_joint_trajectory.points[1].transforms.push_back(
+      Eigen::Translation3d(14.0, 15.0, 0.0) * Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitZ()));
+  trajectory.multi_dof_joint_trajectory.points[1].velocities.resize(1);
+  trajectory.multi_dof_joint_trajectory.points[1].velocities[0] << 16.0, 17.0, 0.0, 0.0, 0.0, 18.0;
+  return trajectory;
+}
+
+tmc_manipulation_types::TimedRobotTrajectory GenerateValidRobotTrajectory() {
+  auto trajectory = GenerateMultiDOFOnlyRobotTrajectory();
+
   trajectory.joint_trajectory.points.resize(2);
   trajectory.joint_trajectory.points[0].positions.resize(2);
   trajectory.joint_trajectory.points[0].positions << 1.0, 2.0;
@@ -55,15 +70,6 @@ tmc_manipulation_types::TimedRobotTrajectory GenerateValidRobotTrajectory() {
   trajectory.joint_trajectory.points[1].velocities.resize(2);
   trajectory.joint_trajectory.points[1].velocities << 7.0, 8.0;
 
-  trajectory.multi_dof_joint_trajectory.points.resize(2);
-  trajectory.multi_dof_joint_trajectory.points[0].transforms.push_back(
-      Eigen::Translation3d(9.0, 10.0, 0.0) * Eigen::AngleAxisd(0.2, Eigen::Vector3d::UnitZ()));
-  trajectory.multi_dof_joint_trajectory.points[0].velocities.resize(1);
-  trajectory.multi_dof_joint_trajectory.points[0].velocities[0] << 11.0, 12.0, 0.0, 0.0, 0.0, 13.0;
-  trajectory.multi_dof_joint_trajectory.points[1].transforms.push_back(
-      Eigen::Translation3d(14.0, 15.0, 0.0) * Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitZ()));
-  trajectory.multi_dof_joint_trajectory.points[1].velocities.resize(1);
-  trajectory.multi_dof_joint_trajectory.points[1].velocities[0] << 16.0, 17.0, 0.0, 0.0, 0.0, 18.0;
   return trajectory;
 }
 
@@ -83,6 +89,16 @@ TEST(ConversionsTest, ExtractInitialPositions) {
   EXPECT_NEAR(0.2, result[4], kEpsilon);
 }
 
+TEST(ConversionsTest, ExtractInitialPositionsMultiDOFOnly) {
+  Eigen::VectorXd result;
+  ExtractInitialPositions(GenerateMultiDOFOnlyRobotTrajectory(), result);
+
+  ASSERT_EQ(3, result.size());
+  EXPECT_DOUBLE_EQ(9.0, result[0]);
+  EXPECT_DOUBLE_EQ(10.0, result[1]);
+  EXPECT_NEAR(0.2, result[2], kEpsilon);
+}
+
 TEST(ConversionsTest, ExtractInitialVelocities) {
   Eigen::VectorXd result;
   ExtractInitialVelocities(GenerateValidRobotTrajectory(), result);
@@ -93,6 +109,16 @@ TEST(ConversionsTest, ExtractInitialVelocities) {
   EXPECT_DOUBLE_EQ(11.0, result[2]);
   EXPECT_DOUBLE_EQ(12.0, result[3]);
   EXPECT_DOUBLE_EQ(13.0, result[4]);
+}
+
+TEST(ConversionsTest, ExtractInitialVelocitiesMultiDOFOnly) {
+  Eigen::VectorXd result;
+  ExtractInitialVelocities(GenerateMultiDOFOnlyRobotTrajectory(), result);
+
+  ASSERT_EQ(3, result.size());
+  EXPECT_DOUBLE_EQ(11.0, result[0]);
+  EXPECT_DOUBLE_EQ(12.0, result[1]);
+  EXPECT_DOUBLE_EQ(13.0, result[2]);
 }
 
 TEST(ConversionsTest, ConvertToWayPoints) {
@@ -114,6 +140,23 @@ TEST(ConversionsTest, ConvertToWayPoints) {
   EXPECT_DOUBLE_EQ(14.0, result[1][2]);
   EXPECT_DOUBLE_EQ(15.0, result[1][3]);
   EXPECT_NEAR(0.4, result[1][4], kEpsilon);
+}
+
+TEST(ConversionsTest, ConvertToWayPointsMultiDOFOnly) {
+  std::vector<Eigen::VectorXd> result;
+  ConvertToWayPoints(GenerateMultiDOFOnlyRobotTrajectory(), result);
+
+  ASSERT_EQ(2, result.size());
+
+  ASSERT_EQ(3, result[0].size());
+  EXPECT_DOUBLE_EQ(9.0, result[0][0]);
+  EXPECT_DOUBLE_EQ(10.0, result[0][1]);
+  EXPECT_NEAR(0.2, result[0][2], kEpsilon);
+
+  ASSERT_EQ(3, result[1].size());
+  EXPECT_DOUBLE_EQ(14.0, result[1][0]);
+  EXPECT_DOUBLE_EQ(15.0, result[1][1]);
+  EXPECT_NEAR(0.4, result[1][2], kEpsilon);
 }
 
 TEST(ConversionsTest, ConvertToWayPointsOverPI) {

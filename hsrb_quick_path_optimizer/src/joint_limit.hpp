@@ -25,7 +25,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
-/// @brief A group of functions that acquire optimization parameters
+/// @brief Function group to obtain optimization parameters
 #ifndef HSRB_QUICK_PATH_OPTIMIZER_JOINT_LIMIT_HPP_
 #define HSRB_QUICK_PATH_OPTIMIZER_JOINT_LIMIT_HPP_
 
@@ -37,7 +37,7 @@ DAMAGE.
 
 namespace hsrb_quick_path_optimizer {
 
-// Get the speed limit
+// Get speed limit
 bool GetVelocityLimit(const rclcpp::Node::SharedPtr& node,
                       const std::vector<std::string>& joint_names,
                       Eigen::VectorXd& dst_limit);

@@ -25,7 +25,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
-/// @brief Athletic for acceleration calculation in bogies after HSR-B
+/// @brief Kinematics for acceleration calculation in carts from HSR-B onwards
 #include <tuple>
 
 #include <gtest/gtest.h>
@@ -38,17 +38,17 @@ constexpr double kEpsilon = 0.01;
 
 namespace hsrb_quick_path_optimizer {
 
-// [IN] Test input, [OUT] limit
+// [IN] Test input, [OUT] Limit
 using OneInputOneResultTuple = std::tuple<double, Eigen::Vector3d>;
 // [IN] Test input 1, [IN] Test input 2, [IN] Test input 3, [OUT] Limit
 using ThreeInputOneResultTuple =
     std::tuple<double, double, double, Eigen::Vector3d>;
 
-// Speed ​​calculation that moves in arbitrary direction from a still state
+// Velocity calculation for moving in any direction from a stationary state
 class MoveDirectionWithStoppingVelocityTest
     : public ::testing::TestWithParam<OneInputOneResultTuple> {};
 
-// Direction, expected calculation result group
+// Direction, expected calculation result pair
 INSTANTIATE_TEST_CASE_P(
     MoveDirectionWithStoppingVelocityTest, MoveDirectionWithStoppingVelocityTest,
     ::testing::Values(
@@ -70,11 +70,11 @@ TEST_P(MoveDirectionWithStoppingVelocityTest, TestCase) {
   EXPECT_NEAR(result[2], std::get<1>(GetParam())[2], kEpsilon);
 }
 
-// Speed ​​calculation according to the bogie turning axis
+// Velocity calculation according to the cart's turning axis
 class BaseRollJointVelocityTest
     : public ::testing::TestWithParam<OneInputOneResultTuple> {};
 
-// Bogie turning shaft angle, expected calculation result group
+// Cart turning axis angle, expected calculation result pair
 INSTANTIATE_TEST_CASE_P(
     BaseRollJointVelocityTest, BaseRollJointVelocityTest,
     ::testing::Values(
@@ -96,11 +96,11 @@ TEST_P(BaseRollJointVelocityTest, TestCase) {
   EXPECT_NEAR(result[2], std::get<1>(GetParam())[2], kEpsilon);
 }
 
-// Speed ​​calculation according to the Origin standard bogie rotation
+// Velocity calculation according to cart rotation based on origin
 class BaseRotationVelocityTest
     : public ::testing::TestWithParam<OneInputOneResultTuple> {};
 
-// ORIGIN standard bogie posture YAW, expected calculation result group
+// Cart posture yaw based on origin, expected calculation result pair
 INSTANTIATE_TEST_CASE_P(
     BaseRotationVelocityTest, BaseRotationVelocityTest,
     ::testing::Values(
@@ -122,11 +122,11 @@ TEST_P(BaseRotationVelocityTest, TestCase) {
   EXPECT_NEAR(result[2], std::get<1>(GetParam())[2], kEpsilon);
 }
 
-// Acceleration calculation that moves in any direction from a still state
+// Acceleration calculation for moving in any direction from a stationary state
 class MoveDirectionWithStoppingAccelerationTest
     : public ::testing::TestWithParam<OneInputOneResultTuple> {};
 
-// Direction, expected calculation result group
+// Direction, expected calculation result pair
 INSTANTIATE_TEST_CASE_P(
     MoveDirectionWithStoppingAccelerationTest, MoveDirectionWithStoppingAccelerationTest,
     ::testing::Values(
@@ -149,11 +149,11 @@ TEST_P(MoveDirectionWithStoppingAccelerationTest, TestCase) {
   EXPECT_NEAR(result[2], std::get<1>(GetParam())[2], kEpsilon);
 }
 
-// Acceleration calculation according to the bogie turning axis
+// Acceleration calculation according to the cart's turning axis
 class BaseRollJointAccelerationTest
     : public ::testing::TestWithParam<OneInputOneResultTuple> {};
 
-// Bogie turning shaft angle, expected calculation result group
+// Cart turning axis angle, expected calculation result pair
 INSTANTIATE_TEST_CASE_P(
     BaseRollJointAccelerationTest, BaseRollJointAccelerationTest,
     ::testing::Values(
@@ -176,11 +176,11 @@ TEST_P(BaseRollJointAccelerationTest, TestCase) {
   EXPECT_NEAR(result[2], std::get<1>(GetParam())[2], kEpsilon);
 }
 
-// Acceleration calculation according to Origin standard bogie rotation
+// Acceleration calculation according to cart rotation based on origin
 class BaseRotationAccelerationTest
     : public ::testing::TestWithParam<OneInputOneResultTuple> {};
 
-// ORIGIN standard bogie posture YAW, expected calculation result group
+// Cart posture yaw based on origin, expected calculation result pair
 INSTANTIATE_TEST_CASE_P(
     BaseRotationAccelerationTest, BaseRotationAccelerationTest,
     ::testing::Values(
@@ -203,11 +203,11 @@ TEST_P(BaseRotationAccelerationTest, TestCase) {
   EXPECT_NEAR(result[2], std::get<1>(GetParam())[2], kEpsilon);
 }
 
-// Acceleration calculation according to each axis speed
+// Acceleration calculation according to each axis velocity
 class JointVelocityInputTest
     : public ::testing::TestWithParam<ThreeInputOneResultTuple> {};
 
-// Right wheel speed, left wheel speed, turning axis speed, expected calculation result group
+// Right wheel velocity, left wheel velocity, turning axis velocity, expected calculation result pair
 INSTANTIATE_TEST_CASE_P(
     JointVelocityInputTest, JointVelocityInputTest,
     ::testing::Values(

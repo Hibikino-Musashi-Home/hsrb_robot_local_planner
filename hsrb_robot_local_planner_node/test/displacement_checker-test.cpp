@@ -99,7 +99,7 @@ TEST_F(DisplacementCheckerTest, DisplacementPublishment) {
     min << 0.0, 0.0, 0.0, 0.0, 0.0, 0.1;
     tmc_manipulation_types::RegionValues max;
     max << 0.0, 0.1, 0.2, 0.0, 0.0, 0.5;
-    // HSR-B's joint position with zero joint position
+    // End-effector position at joint position zero of HSR-B
     tmc_manipulation_types::TaskSpaceRegion tsr(
         Eigen::Translation3d(0.158, 0.078, 0.825) * Eigen::Quaterniond(0.0, 0.0, 0.0, 1.0),
         Eigen::Affine3d::Identity(), min, max, "odom", "hand_palm_link");
@@ -115,7 +115,8 @@ TEST_F(DisplacementCheckerTest, DisplacementPublishment) {
 
 
   displacement_checker_->UpdateConstraints(constraints);
-  EXPECT_FALSE(displacement_checker_->ShouldComplete("constraints", robot_state));
+  EXPECT_EQ(displacement_checker_->ShouldComplete("constraints", robot_state),
+            DisplacementChecker::Result::kNotComplete);
 
   while (rclcpp::ok()) {
     SpinSome();

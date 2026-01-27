@@ -32,6 +32,7 @@ DAMAGE.
 #include "node.hpp"
 
 #include <algorithm>
+#include <unordered_set>
 
 #include <tf2_eigen/tf2_eigen.hpp>
 
@@ -39,6 +40,7 @@ DAMAGE.
 #include <tmc_manipulation_types_bridge/manipulation_msg_convertor.hpp>
 #include <tmc_robot_local_planner_utils/common.hpp>
 #include <tmc_robot_local_planner_utils/converter.hpp>
+#include <tmc_robot_local_planner_utils/extractor.hpp>
 #include <tmc_utils/parameters.hpp>
 #include <tmc_utils/qos.hpp>
 
@@ -50,27 +52,43 @@ const double kPublishPeriodScale = 5;       // 200msec * 5 = 1.0s
 const char* const kOriginFrame = "odom";
 const char* const kBaseJointName = "world_joint";
 
+bool OverwriteRobotState(const tmc_manipulation_types::RobotState& source,
+                         tmc_manipulation_types::RobotState& target_out) {
+  for (uint32_t i = 0; i < source.joint_state.name.size(); ++i) {
+    auto it = std::find(target_out.joint_state.name.begin(), target_out.joint_state.name.end(),
+                        source.joint_state.name[i]);
+    if (it == target_out.joint_state.name.end()) {
+      return false;
+    }
+    auto j = std::distance(target_out.joint_state.name.begin(), it);
+    target_out.joint_state.position[j] = source.joint_state.position[i];
+    if (source.joint_state.velocity.size() == source.joint_state.position.size()) {
+      target_out.joint_state.velocity[j] = source.joint_state.velocity[i];
+    }
+  }
+  if (!source.multi_dof_joint_state.poses.empty()) {
+    target_out.multi_dof_joint_state.names = source.multi_dof_joint_state.names;
+    target_out.multi_dof_joint_state.poses = source.multi_dof_joint_state.poses;
+    target_out.multi_dof_joint_state.twist = source.multi_dof_joint_state.twist;
+  }
+  return true;
+}
+
+std::vector<std::string> FindMissingStrings(const std::vector<std::string>& before,
+                                            const std::vector<std::string>& after) {
+  const std::unordered_set<std::string> after_set(after.begin(), after.end());
+  std::vector<std::string> missing;
+  for (const auto& s : before) {
+    if (after_set.find(s) == after_set.end()) {
+      missing.push_back(s);
+    }
+  }
+  return missing;
+}
+
 }  // namespace
 
 namespace hsrb_robot_local_planner_node {
-
-std::vector<std::string> GetIgnoreJoints(const HsrbJointNames& joint_names, const RobotLocalGoal& constraints) {
-  std::vector<std::string> joints;
-  if (!constraints.enable_head) {
-    joints.insert(joints.begin(), joint_names.head_joints.begin(), joint_names.head_joints.end());
-  }
-  if (!constraints.enable_arm) {
-    joints.insert(joints.begin(), joint_names.arm_joints.begin(), joint_names.arm_joints.end());
-  }
-  if (!constraints.enable_gripper) {
-    joints.insert(joints.begin(), joint_names.hand_joints.begin(), joint_names.hand_joints.end());
-  }
-  if (!constraints.enable_base) {
-    joints.push_back(kBaseJointName);
-  }
-  return joints;
-}
-
 
 RobotLocalPlannerNodeBase::RobotLocalPlannerNodeBase() : RobotLocalPlannerNodeBase(rclcpp::NodeOptions()) {}
 
@@ -78,7 +96,8 @@ RobotLocalPlannerNodeBase::RobotLocalPlannerNodeBase(const rclcpp::NodeOptions& 
     : Node("hsrb_robot_local_planner", options),
       tf_buffer_(this->get_clock()),
       tf_listener_(tf_buffer_),
-      constraints_are_changed_(false) {}
+      constraints_are_changed_(false),
+      enable_base_prev_(false) {}
 
 void RobotLocalPlannerNodeBase::Run() {
   Run([]() { return false; });
@@ -92,6 +111,7 @@ void RobotLocalPlannerNodeBase::Run(std::function<bool()> interrupt) {
     rate.sleep();
   }
 
+  // TODO(Takeshita) タイマーで行いたかったが，上手くコールバックが回らなかったので諦めた
   // callback_group_ = node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   // timer_ = node->create_wall_timer(std::chrono::milliseconds(static_cast<int64_t>(kConnectPoint * 1000)),
   //                                  std::bind(&HsrbRobotLocalPlannerNode::Execute, this), callback_group_);
@@ -113,7 +133,7 @@ void RobotLocalPlannerNodeBase::InitializeRosInterfaces(const rclcpp::Node::Shar
       "~/constraints", tmc_utils::ReliableVolatileQoS(),
       std::bind(&RobotLocalPlannerNodeBase::ConstraintCallback, this, std::placeholders::_1));
 
-  joint_trajectories_pub_ = std::make_shared<HsrbJointTrajectoriesPublisher>(node);
+  joint_trajectories_pub_ = std::make_shared<JointTrajectoriesPublisher>(node);
   status_pub_ = std::make_shared<RobotLocalPlannerStatusPublisher>(node);
   is_empty_pub_ = node->create_publisher<std_msgs::msg::Bool>(
       "~/is_constraints_empty", tmc_utils::ReliableVolatileQoS());
@@ -161,11 +181,14 @@ void RobotLocalPlannerNodeBase::Execute() {
     constraints_are_changed_ = false;
   }
 
-  // If constraint is empty, stop
+  // Stop if the constraint is empty
   if (goal_constraints.IsEmpty()) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 60000, "constraints are empty");
     if (constraints_are_changed) {
-      joint_trajectories_pub_->PublishStopTrajectory();
+      joint_trajectories_pub_->PublishStopTrajectory(current_trajectory_);
+      if (enable_base_prev_) {
+        joint_trajectories_pub_->PublishBaseStopTrajectory();
+      }
       current_trajectory_.setData(tmc_manipulation_types::TimedRobotTrajectory());
       status_pub_->UpdateConstraintsStatus(goal_constraints.id, tmc_planning_msgs::msg::ConstraintsStatus::EMPTY);
     }
@@ -175,17 +198,22 @@ void RobotLocalPlannerNodeBase::Execute() {
   }
   status_pub_->UpdateConstraintsStatus(goal_constraints.id, tmc_planning_msgs::msg::ConstraintsStatus::RUNNING);
 
-  // Initial is the initial value of the operation plan, and the REF is a robot state for the termination judgment
+  // 'initial' is the initial value of the motion plan, 'ref' is the robot state for termination judgment
   const auto target_time = this->now() + rclcpp::Duration::from_seconds(kConnectPoint);
   tmc_manipulation_types::RobotState initial_state;
   tmc_manipulation_types::RobotState ref_state;
   rclcpp::Time connectable_time;
-  UpdateRobotstate(target_time, initial_state, ref_state, connectable_time);
+  if (!UpdateRobotstate(target_time, initial_state, ref_state, connectable_time)) {
+    PublishIsEmpty(false);
+    status_pub_->Publish(RobotLocalPlannerErrorCodeLocal::kInvalidInputRobotState);
+    return;
+  }
 
   if (use_current_state_for_displacement_) {
     ref_state = GenerateInitialState();
   }
-  if (displacement_checker_->ShouldComplete(goal_constraints.id, ref_state)) {
+  const auto displacement_result = displacement_checker_->ShouldComplete(goal_constraints.id, ref_state);
+  if (displacement_result == DisplacementChecker::Result::kComplete) {
     if (remove_completed_constraints_) {
       RCLCPP_INFO(this->get_logger(), "constraints are satisfied");
       current_trajectory_.setData(tmc_manipulation_types::TimedRobotTrajectory());
@@ -199,18 +227,44 @@ void RobotLocalPlannerNodeBase::Execute() {
     status_pub_->UpdateConstraintsStatus(goal_constraints.id, tmc_planning_msgs::msg::ConstraintsStatus::SATISFIED);
     status_pub_->Publish(tmc_robot_local_planner::RobotLocalPlannerErrorCode::kConstraintsEmpty);
     return;
+  } else if (displacement_result == DisplacementChecker::Result::kInvalidRobotState) {
+    PublishIsEmpty(false);
+    status_pub_->Publish(RobotLocalPlannerErrorCodeLocal::kInvalidInputRobotState);
+    return;
   }
+  if (!current_trajectory_.multi_dof_joint_trajectory.points.empty()) {
+    const auto time_from_start = current_trajectory_.multi_dof_joint_trajectory.points.back().time_from_start;
+    const auto trajectory_end_time = tf2::timeToSec(current_trajectory_.stamp_) + time_from_start;
+    // If the remaining time is short, planning a new trajectory may result in a trajectory via unnecessary intermediate postures, so continue trajectory following for now
+    // Success/failure judgment, replanning if the target is not reached will be done in the next loop
+    if (trajectory_end_time < target_time.seconds()) {
+      RCLCPP_INFO(this->get_logger(), "Remaining trajectory time (%f sec) is less than connect point (%f sec).",
+                  time_from_start, kConnectPoint);
+      // In the next loop, trajectory playback should be finished, so make it an empty trajectory
+      current_trajectory_.setData(tmc_manipulation_types::TimedRobotTrajectory());
+      PublishIsEmpty(false);
+      status_pub_->Publish(tmc_robot_local_planner::RobotLocalPlannerErrorCode::kSuccess);
+      return;
+    }
+  }
+
   PublishIsEmpty(false);
 
-  // Play the last orbit selected last time when the constraint switch is switched.
+  // When switching constraints, exclude the previous trajectory from being selected
   std::optional<tmc_manipulation_types::TimedRobotTrajectory> previous_trajectory;
   if (!constraints_are_changed) {
     previous_trajectory = GetPreviousTrajectory(current_trajectory_, initial_state, target_time);
   }
 
-  // Orbital generation
-  const auto ignore_joints = GetIgnoreJoints(joint_trajectories_pub_->GetJointNames(), goal_constraints);
-  const auto [trajectory, error_code] = PlanImpl(previous_trajectory, initial_state, ignore_joints, goal_constraints);
+  // Since it is used for trajectory issuance, hold it before trajectory generation
+  sensor_msgs::msg::JointState joint_state_msg;
+  {
+    std::lock_guard<std::mutex> lock(joint_state_mutex_);
+    joint_state_msg = *joint_state_;
+  }
+
+  // Trajectory generation
+  const auto [trajectory, error_code] = PlanImpl(previous_trajectory, initial_state, goal_constraints);
   status_pub_->Publish(error_code);
 
   if (error_code != tmc_robot_local_planner::RobotLocalPlannerErrorCode::kSuccess) {
@@ -222,34 +276,42 @@ void RobotLocalPlannerNodeBase::Execute() {
     return;
   }
 
-  // Extract only the trajectory of the last 1 second so that you do not move too much
+  // To avoid excessive movement, extract only the trajectory of the last 1 second
   auto publish_solution = trajectory;
   tmc_robot_local_planner_utils::DeleteTrajectoryPointsAtTime(kConnectPoint * kPublishPeriodScale, publish_solution);
 
-  // Convert to HSR joint orbital
-  trajectory_msgs::msg::JointTrajectory head_trajectory_msg;
-  trajectory_msgs::msg::JointTrajectory arm_trajectory_msg;
-  trajectory_msgs::msg::JointTrajectory hand_trajectory_msg;
-  trajectory_msgs::msg::JointTrajectory base_trajectory_msg;
-  RobotTrajectoryToHsrbTrajectoryMsg(publish_solution, connectable_time, joint_trajectories_pub_->GetJointNames(),
-                                     head_trajectory_msg, arm_trajectory_msg,
-                                     hand_trajectory_msg, base_trajectory_msg);
-  joint_trajectories_pub_->SetHeadTrajectory(head_trajectory_msg);
-  joint_trajectories_pub_->SetArmTrajectory(arm_trajectory_msg);
-  joint_trajectories_pub_->SetHandTrajectory(hand_trajectory_msg);
-  // Orbit points to be erased in consideration of speed change
-  uint32_t delete_point_num = DeleteTrajectoryFewPoints(initial_state, publish_solution);
-  tmc_robot_local_planner_utils::DeleteTrajectoryPointsAtPoint(delete_point_num, base_trajectory_msg);
-  joint_trajectories_pub_->SetBaseTrajectory(base_trajectory_msg);
+  // Convert to JointTrajectoryMsg and issue
+  trajectory_msgs::msg::JointTrajectory joint_trajectory_msg;
+  tmc_manipulation_types_bridge::TimedJointTrajectoryToJointTrajectoryMsg(
+      publish_solution.joint_trajectory, joint_trajectory_msg);
+  joint_trajectory_msg.header.stamp = connectable_time;
+  joint_trajectories_pub_->PublishJointTrajectory(joint_trajectory_msg, joint_state_msg);
 
-  // Issuance to each joint
-  joint_trajectories_pub_->PublishTrajectory(goal_constraints.enable_head,
-                                             goal_constraints.enable_arm,
-                                             goal_constraints.enable_gripper,
-                                             goal_constraints.enable_base);
+  if (goal_constraints.enable_base) {
+    const auto base_trajectory = tmc_robot_local_planner_utils::ExtractMultiDOFJointTrajectory(
+        publish_solution.multi_dof_joint_trajectory, joint_trajectories_pub_->base_coordinates());
+    trajectory_msgs::msg::JointTrajectory base_trajectory_msg;
+    tmc_manipulation_types_bridge::TimedJointTrajectoryToJointTrajectoryMsg(base_trajectory, base_trajectory_msg);
+    base_trajectory_msg.header.stamp = connectable_time;
+
+    uint32_t delete_point_num = DeleteTrajectoryFewPoints(initial_state, publish_solution);
+    tmc_robot_local_planner_utils::DeleteTrajectoryPointsAtPoint(delete_point_num, base_trajectory_msg);
+    joint_trajectories_pub_->PublishBaseTrajectory(base_trajectory_msg);
+  }
+
+  // If the joints used have changed, stop the joints that are no longer used
+  const auto missing_joints = FindMissingStrings(
+      current_trajectory_.joint_trajectory.joint_names, trajectory.joint_trajectory.joint_names);
+  if (!missing_joints.empty()) {
+    joint_trajectories_pub_->PublishStopTrajectory(missing_joints, connectable_time);
+  }
+  if (enable_base_prev_ && !goal_constraints.enable_base) {
+    joint_trajectories_pub_->PublishBaseStopTrajectory(connectable_time);
+  }
 
   current_trajectory_.setData(trajectory);
   current_trajectory_.stamp_ = ConvertToTf2(connectable_time);
+  enable_base_prev_ = goal_constraints.enable_base;
 }
 
 void RobotLocalPlannerNodeBase::JointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
@@ -296,16 +358,8 @@ tmc_manipulation_types::RobotState RobotLocalPlannerNodeBase::GenerateInitialSta
     tmc_manipulation_types_bridge::JointStateMsgToJointState(*joint_state_, joint_state);
   }
 
-  const auto joint_names = joint_trajectories_pub_->GetJointNames();
-
-  tmc_manipulation_types::NameSeq use_name;
-  use_name.insert(use_name.end(), joint_names.arm_joints.begin(), joint_names.arm_joints.end());
-  use_name.insert(use_name.end(), joint_names.hand_joints.begin(), joint_names.hand_joints.end());
-  use_name.insert(use_name.end(), joint_names.head_joints.begin(), joint_names.head_joints.end());
-
   tmc_manipulation_types::RobotState robot_state;
-  robot_state.joint_state = tmc_manipulation_types::ExtractPartialJointState(joint_state, use_name);
-  robot_state.joint_state.velocity = Eigen::VectorXd::Zero(use_name.size());
+  robot_state.joint_state = joint_state;
   robot_state.multi_dof_joint_state.names.push_back(kBaseJointName);
   robot_state.multi_dof_joint_state.poses.resize(1);
   tf2::fromMsg(odom.pose.pose, robot_state.multi_dof_joint_state.poses[0]);
@@ -331,34 +385,45 @@ void RobotLocalPlannerNodeBase::CalcInitOdomState(nav_msgs::msg::Odometry& odom_
   odom_out.pose.pose.orientation.w = std::cos(yaw_angle / 2.0);
 }
 
-void RobotLocalPlannerNodeBase::UpdateRobotstate(
+bool RobotLocalPlannerNodeBase::UpdateRobotstate(
     const rclcpp::Time& target_time,
     tmc_manipulation_types::RobotState& initial_state,
     tmc_manipulation_types::RobotState& ref_state,
     rclcpp::Time& connectable_time) {
+  initial_state = GenerateInitialState();
+
   tf2::Stamped<tmc_manipulation_types::RobotState> initial_state_stamped;
   if (tmc_robot_local_planner_utils::SearchConnectablePoint(
           current_trajectory_, target_time, connectable_time, initial_state_stamped)) {
-    // If the robot state of Target_time can be obtained from the last orbit, return it with INITIAL/REF.
-    initial_state = ConvertRobotStateStampedToRobotState(initial_state_stamped);
+    // If the robot state at target_time can be obtained from the previous trajectory, return it with initial/ref
+    const auto initial_state_from_trajectory = ConvertRobotStateStampedToRobotState(initial_state_stamped);
+    if (!OverwriteRobotState(initial_state_from_trajectory, initial_state)) {
+      RCLCPP_ERROR(this->get_logger(), "Invalid joint names in trajectory");
+      return false;
+    }
     ref_state = initial_state;
   } else {
-    // If you cannot get it, the operation plan will be made from the current state
+    // If it cannot be obtained, perform motion planning from the current state
+    // TODO(Takeshita) 動作計画は前回軌道の最終状態から行うのが正しい？ つまりrefとinitialは同じ？
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 60000, "non connectable point");
-    initial_state = GenerateInitialState();
-    if (current_trajectory_.joint_trajectory.points.empty()) {
-      ref_state = initial_state;
-    } else {
-      tmc_robot_local_planner_utils::GetLastPoint(current_trajectory_, ref_state);
+    ref_state = initial_state;
+    if (!current_trajectory_.joint_trajectory.points.empty()) {
+      tmc_manipulation_types::RobotState last_point_state;
+      tmc_robot_local_planner_utils::GetLastPoint(current_trajectory_, last_point_state);
+      if (!OverwriteRobotState(last_point_state, ref_state)) {
+        RCLCPP_ERROR(this->get_logger(), "Invalid joint names in trajectory");
+        return false;
+      }
     }
     connectable_time = target_time;
   }
+  return true;
 }
 
 uint32_t RobotLocalPlannerNodeBase::DeleteTrajectoryFewPoints(
     const tmc_manipulation_types::RobotState& initial_state,
     const tmc_manipulation_types::TimedRobotTrajectory& trajectory) const {
-  // The distance between KconnectPoint, depending on the speed and deceleration
+  // Distance traveled by acceleration/deceleration between kConnectPoint
   const double d = 0.5 * acceralation_limit_ * std::pow(kConnectPoint, 2.0);
 
   for (uint32_t i = 0; i < trajectory.multi_dof_joint_trajectory.points.size(); ++i) {
@@ -393,7 +458,8 @@ void RobotLocalPlannerNodeWithAction::InitializePlanner(const rclcpp::Node::Shar
   trajectory_merger_ = std::make_shared<
       tmc_robot_local_planner::TrajectoryMerger<moveit_msgs::msg::RobotTrajectory>>();
 
-  // Since it was not possible to remap, specify explicitly
+  // TODO(Takeshita) パラメータにする
+  // Explicitly specify because remapping was not possible
   tmc_robot_local_planner::RobotLocalPlanner::ActionNames action_names;
   action_names.generate_action = "generator/generate";
   action_names.evaluate_action = "evaluator/evaluate";
@@ -417,9 +483,8 @@ bool RobotLocalPlannerNodeWithAction::IsReady() {
 RobotLocalPlannerNodeBase::PlanResult RobotLocalPlannerNodeWithAction::PlanImpl(
     const std::optional<tmc_manipulation_types::TimedRobotTrajectory>& previous_trajectory,
     const tmc_manipulation_types::RobotState& initial_state,
-    const std::vector<std::string>& ignore_joints,
     const RobotLocalGoal& constraints) {
-  // Set the previous orbit
+  // Set the previous trajectory
   if (previous_trajectory) {
     moveit_msgs::msg::RobotTrajectory previous_trajectory_msg;
     tmc_manipulation_types_bridge::TimedRobotTrajectoryToRobotTrajectoryMsg(
@@ -432,9 +497,9 @@ RobotLocalPlannerNodeBase::PlanResult RobotLocalPlannerNodeWithAction::PlanImpl(
   moveit_msgs::msg::RobotState initial_state_msg;
   tmc_manipulation_types_bridge::RobotStateToRobotStateMsg(initial_state, initial_state_msg);
 
-  // Orbital generation
+  // Trajectory generation
   auto trajectory_future = robot_local_planner_->PlanPath(constraints.constraints_msg, initial_state_msg,
-                                                          constraints.normalized_velocity, ignore_joints);
+                                                          constraints.normalized_velocity, constraints.enable_base);
   while (trajectory_future.wait_for(std::chrono::milliseconds(1)) == std::future_status::timeout) {}
   const auto trajectory = trajectory_future.get();
 
@@ -473,18 +538,17 @@ void RobotLocalPlannerNodeWithPlugin::InitializePlanner(const rclcpp::Node::Shar
 RobotLocalPlannerNodeBase::PlanResult RobotLocalPlannerNodeWithPlugin::PlanImpl(
     const std::optional<tmc_manipulation_types::TimedRobotTrajectory>& previous_trajectory,
     const tmc_manipulation_types::RobotState& initial_state,
-    const std::vector<std::string>& ignore_joints,
     const RobotLocalGoal& constraints) {
-  // Set the previous orbit
+  // Set the previous trajectory
   if (previous_trajectory) {
     trajectory_merger_->SetTrajectory(previous_trajectory.value());
   } else {
     trajectory_merger_->ClearTrajectory();
   }
 
-  // Orbital generation
+  // Trajectory generation
   auto trajectory_future = robot_local_planner_->PlanPath(constraints.constraints, initial_state,
-                                                          constraints.normalized_velocity, ignore_joints);
+                                                          constraints.normalized_velocity, constraints.enable_base);
   while (trajectory_future.wait_for(std::chrono::milliseconds(1)) == std::future_status::timeout) {}
   const auto trajectory = trajectory_future.get();
   return {trajectory, robot_local_planner_->last_error_code()};

@@ -25,7 +25,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
-/// @brief Profile for optimization and conversion functions for post -processing
+/// @brief Transformation functions for preprocessing and postprocessing of optimization
 
 #include "conversions.hpp"
 
@@ -54,7 +54,7 @@ void ConvertPositions(const Eigen::VectorXd& joint_positions,
                       const Eigen::Affine3d& base_pose,
                       double previous_theta,
                       Eigen::VectorXd& dst_positions) {
-  // Joint axis + trolley 3 axis
+  // Joint axis + 3-axis of the cart
   dst_positions.resize(joint_positions.size() + kBaseJointNum);
   dst_positions << joint_positions, Get2DPose(base_pose, previous_theta);
 }
@@ -69,42 +69,62 @@ void ConvertPositions(const Eigen::VectorXd& joint_positions,
 
 namespace hsrb_quick_path_optimizer {
 
-// Extracting the initial position, only for HSR-B
+// Extract initial position, exclusive for HSR-B and later
 void ExtractInitialPositions(const tmc_manipulation_types::TimedRobotTrajectory& trajectory,
                              Eigen::VectorXd& dst_positions) {
+  Eigen::VectorXd joint_positions = Eigen::VectorXd::Zero(0);
+  if (!trajectory.joint_trajectory.points.empty()) {
+    joint_positions = trajectory.joint_trajectory.points[0].positions;
+  }
   ConvertPositions(
-      trajectory.joint_trajectory.points[0].positions,
+      joint_positions,
       trajectory.multi_dof_joint_trajectory.points[0].transforms[0],
       dst_positions);
 }
 
-// Extracting the initial speed, exclusively after HSR-B
+// Extract initial velocity, exclusive for HSR-B and later
 void ExtractInitialVelocities(const tmc_manipulation_types::TimedRobotTrajectory& trajectory,
                               Eigen::VectorXd& dst_velocities) {
-  // Joint axis + trolley 3 axis
-  dst_velocities.resize(
-      trajectory.joint_trajectory.points[0].velocities.size() + kBaseJointNum);
-  dst_velocities << trajectory.joint_trajectory.points[0].velocities,
+  // Joint axis + 3-axis of the cart
+  Eigen::VectorXd joint_velocities = Eigen::VectorXd::Zero(0);
+  if (trajectory.joint_trajectory.points.size() > 0) {
+    joint_velocities = trajectory.joint_trajectory.points[0].velocities;
+  }
+  dst_velocities.resize(joint_velocities.size() + kBaseJointNum);
+  dst_velocities << joint_velocities,
                     tmc_robot_local_planner_utils::Get2DTwist(
                         trajectory.multi_dof_joint_trajectory.points[0].velocities[0]);
 }
 
-// Convert trajectory to molds for optimization
+// Convert trajectory to type for input to optimization
 void ConvertToWayPoints(const tmc_manipulation_types::TimedRobotTrajectory& trajectory,
                         std::vector<Eigen::VectorXd>& dst_way_points) {
-  dst_way_points.resize(trajectory.joint_trajectory.points.size());
+  if (trajectory.joint_trajectory.points.empty()) {
+    dst_way_points.resize(trajectory.multi_dof_joint_trajectory.points.size());
 
-  double previous_theta = 0.0;
-  for (uint32_t i = 0; i < dst_way_points.size(); ++i) {
-    ConvertPositions(
-        trajectory.joint_trajectory.points[i].positions,
-        trajectory.multi_dof_joint_trajectory.points[i].transforms[0],
-        previous_theta, dst_way_points[i]);
-    previous_theta = dst_way_points[i][dst_way_points[i].size() - 1];
+    double previous_theta = 0.0;
+    for (uint32_t i = 0; i < dst_way_points.size(); ++i) {
+      ConvertPositions(
+          Eigen::VectorXd::Zero(0),
+          trajectory.multi_dof_joint_trajectory.points[i].transforms[0],
+          previous_theta, dst_way_points[i]);
+      previous_theta = dst_way_points[i][dst_way_points[i].size() - 1];
+    }
+  } else {
+    dst_way_points.resize(trajectory.joint_trajectory.points.size());
+
+    double previous_theta = 0.0;
+    for (uint32_t i = 0; i < dst_way_points.size(); ++i) {
+      ConvertPositions(
+          trajectory.joint_trajectory.points[i].positions,
+          trajectory.multi_dof_joint_trajectory.points[i].transforms[0],
+          previous_theta, dst_way_points[i]);
+      previous_theta = dst_way_points[i][dst_way_points[i].size() - 1];
+    }
   }
 }
 
-// Take out optimization results
+// Extract optimization results
 void SampleTrajectoryPoint(
     const ITrajectoryFilterAdapter::Ptr& filter,
     double time_from_start,
@@ -113,7 +133,7 @@ void SampleTrajectoryPoint(
   const auto positions = filter->GetPosition(time_from_start);
   const auto velocities = filter->GetVelocity(time_from_start);
 
-  // The assumption that it is stored in the order of the joint axis and three bogies
+  // Assumed to be stored in the order of joint axis, 3-axis of the cart
   auto joint_num = positions.size() - kBaseJointNum;
   dst_joint_point.time_from_start = time_from_start;
   dst_joint_point.positions = positions.head(joint_num);
@@ -124,7 +144,7 @@ void SampleTrajectoryPoint(
   dst_base_point.velocities.push_back(tmc_robot_local_planner_utils::GetTwist(velocities.tail(kBaseJointNum)));
 }
 
-// Remove the optimization result for each Sampling_step [SEC] and convert it to a ROS message.
+// Extract optimization results at every sampling_step[sec] and convert to ROS message
 void ConvertToRobotTrajectory(const ITrajectoryFilterAdapter::Ptr& filter,
                               const std::vector<std::string>& joint_names,
                               const std::string& base_joint_name,
@@ -133,7 +153,7 @@ void ConvertToRobotTrajectory(const ITrajectoryFilterAdapter::Ptr& filter,
   dst_trajctory.joint_trajectory.joint_names = joint_names;
   dst_trajctory.multi_dof_joint_trajectory.joint_names = {base_joint_name};
 
-  // 0 seconds will not be played because it will not be played
+  // 0 seconds is not played back, so do not sample
   const double duration = filter->GetDuration();
   double time_from_start = sampling_step;
   while (time_from_start < duration) {

@@ -25,7 +25,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
-/// @brief Athletic for acceleration calculation in bogies after HSR-B
+/// @brief Kinematics for acceleration calculation in carts from HSR-B onwards
 
 #include "base_kinematics_ros.hpp"
 

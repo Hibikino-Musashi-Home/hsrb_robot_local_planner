@@ -1,31 +1,29 @@
 #!/usr/bin/env python
-'''
-Copyright (c) 2024 TOYOTA MOTOR CORPORATION
-All rights reserved.
-Redistribution and use in source and binary forms, with or without
-modification, are permitted (subject to the limitations in the disclaimer
-below) provided that the following conditions are met:
-* Redistributions of source code must retain the above copyright notice, this
-  list of conditions and the following disclaimer.
-* Redistributions in binary form must reproduce the above copyright notice,
-  this list of conditions and the following disclaimer in the documentation
-  and/or other materials provided with the distribution.
-* Neither the name of the copyright holder nor the names of its contributors may be used
-  to endorse or promote products derived from this software without specific
-  prior written permission.
-NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE GRANTED BY THIS
-LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
-THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
-GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
-HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
-LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
-OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
-DAMAGE.
-'''
+# Copyright (c) 2024 TOYOTA MOTOR CORPORATION
+# All rights reserved.
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted (subject to the limitations in the disclaimer
+# below) provided that the following conditions are met:
+# * Redistributions of source code must retain the above copyright notice, this
+#   list of conditions and the following disclaimer.
+# * Redistributions in binary form must reproduce the above copyright notice,
+#   this list of conditions and the following disclaimer in the documentation
+#   and/or other materials provided with the distribution.
+# * Neither the name of the copyright holder nor the names of its contributors may be used
+#   to endorse or promote products derived from this software without specific
+#   prior written permission.
+# NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE GRANTED BY THIS
+# LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+# THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+# GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+# OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+# DAMAGE.
 # -*- coding: utf-8 -*-
 
 from geometry_msgs.msg import (
@@ -49,6 +47,8 @@ import tf2_ros
 from tmc_planning_msgs.msg import (
     Constraints,
     ConstraintsStatus,
+    LinearConstraint,
+    LinearConstraintWithPose,
     RangeJointConstraint,
     RobotLocalGoal,
     RobotLocalPlannerStatus,
@@ -70,24 +70,30 @@ WAIT_FOR_COMPLETE_TIMEOUT = 20.0
 
 def _create_robot_local_goal(constraints,
                              normalized_velocity=0.5,
-                             enable_arm=True,
-                             enable_head=True,
-                             enable_base=True,
-                             enable_gripper=True):
+                             enable_base=True):
     return RobotLocalGoal(constraints=constraints,
                           normalized_velocity=normalized_velocity,
-                          enable_arm=enable_arm,
-                          enable_head=enable_head,
-                          enable_base=enable_base,
-                          enable_gripper=enable_gripper)
+                          enable_base=enable_base)
 
 
-def _create_constraints(hjc=[], hlc=[], sjc=[], slc=[], hplc=[]):
+def _create_constraints(
+    hjc=[],
+    hlc=[],
+    sjc=[],
+    slc=[],
+    grlc=LinearConstraint(),
+    imlc=LinearConstraintWithPose(),
+    hplc=[],
+    spjc=[]
+):
     return Constraints(hard_joint_constraints=hjc,
                        hard_link_constraints=hlc,
                        soft_joint_constraints=sjc,
                        soft_link_constraints=slc,
-                       hard_path_link_constraints=hplc)
+                       goal_relative_linear_constraint=grlc,
+                       initial_motion_linear_constraint=imlc,
+                       hard_path_link_constraints=hplc,
+                       soft_path_joint_constraints=spjc)
 
 
 def _lookup_odom_to_ref(tf_buffer, ref_frame_id, stamp):
@@ -129,20 +135,20 @@ class RobotLocalPlanner(Node):
     #     self._tf2_listener = None
     #     rospy.signal_shutdown('shutdown')
 
-    def move_base_relative(self, x=0.0, y=0.0, yaw=0.0, enable_head=True):
-        return self.move_base_any_frame(x, y, yaw, BASE, enable_head)
+    def move_base_relative(self, x=0.0, y=0.0, yaw=0.0):
+        return self.move_base_any_frame(x, y, yaw, BASE)
 
-    def move_base_absolute(self, x=0.0, y=0.0, yaw=0.0, enable_head=True):
-        return self.move_base_any_frame(x, y, yaw, 'map', enable_head)
+    def move_base_absolute(self, x=0.0, y=0.0, yaw=0.0):
+        return self.move_base_any_frame(x, y, yaw, 'map')
 
-    def move_base_any_frame(self, x=0.0, y=0.0, yaw=0.0, frame_id=None, enable_head=True):
+    def move_base_any_frame(self, x=0.0, y=0.0, yaw=0.0, frame_id=None):
         if frame_id is None:
             self.get_logger().warn('frame_id is not set.')
             return
         joint_states = self._joint_state_sub.get_joint_state(MOTION_PLANNING_JOINTS)
         rjc = self._create_joint_constraint(joint_states, pose(x, y, 0.0, 0.0, 0.0, yaw), frame_id)
         constraint = _create_constraints(hjc=[rjc])
-        goal = _create_robot_local_goal(constraint, enable_arm=False, enable_head=enable_head, enable_gripper=False)
+        goal = _create_robot_local_goal(constraint)
         return self.publish(goal)
 
     def move_to_joint_positions_with_base_relative(self, joint_goals={},
@@ -200,9 +206,7 @@ class RobotLocalPlanner(Node):
     def move_end_effector_pose(self, pose, ref_frame_id=None,
                                min_bounds=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                                max_bounds=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                               normalized_velocity=0.5,
-                               enable_head=True,
-                               enable_gripper=True):
+                               normalized_velocity=0.5):
         if ref_frame_id is None:
             ref_frame_id = BASE
 
@@ -215,14 +219,13 @@ class RobotLocalPlanner(Node):
                                              max_bounds=max_bounds)
         tlc = self._create_tsr_link_constraint(tsr)
         constraints = _create_constraints(hlc=[tlc])
-        goal = _create_robot_local_goal(constraints, normalized_velocity,
-                                        enable_head=enable_head, enable_gripper=enable_gripper)
+        goal = _create_robot_local_goal(constraints, normalized_velocity)
         return self.publish(goal)
 
     def publish_empty_constraints(self):
         constraint = _create_constraints()
-        goal = _create_robot_local_goal(constraint, 1.0, False, False, False, False)
-        # Goal_id does not return, because there is no point in waiting with Goal_id
+        goal = _create_robot_local_goal(constraint)
+        # Do not return goal_id, as there is no point in waiting for goal_id
         self.publish(goal)
 
     def publish(self, goal):

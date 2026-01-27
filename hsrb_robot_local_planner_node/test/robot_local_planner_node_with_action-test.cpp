@@ -26,7 +26,7 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
 /// @file     robot_local_planner-test.cpp
-/// @brief    HSRB_ROBOT_LOCAL_PLANNER_NODE test
+/// @brief    Test of hsrb_robot_local_planner_node
 /// @author   Satoru Onoda
 
 #include <gtest/gtest.h>
@@ -103,37 +103,47 @@ class DummyGenerator : public DummyBase<tmc_planning_msgs::action::GenerateRobot
  public:
   using Ptr = std::shared_ptr<DummyGenerator>;
 
-  explicit DummyGenerator(const rclcpp::Node::SharedPtr& node) : DummyBase(node, "/generator/generate") {}
+  explicit DummyGenerator(const rclcpp::Node::SharedPtr& node)
+      : DummyBase(node, "/generator/generate"), trajectory_duration_(1.5) {}
   virtual ~DummyGenerator() = default;
+
+  void set_trajectory_duration(double duration) { trajectory_duration_ = duration; }
 
  protected:
   std::shared_ptr<ResultType> ExecuteImpl(const std::shared_ptr<const GoalType>& goal) override {
+    const auto rjc_min = goal->constraints.hard_joint_constraints[0].min;
+    const auto initial_state = goal->initial_state;
+
     moveit_msgs::msg::RobotTrajectory trajectory;
-    trajectory.joint_trajectory.joint_names = goal->initial_state.joint_state.name;
-    trajectory.multi_dof_joint_trajectory.joint_names = goal->initial_state.multi_dof_joint_state.joint_names;
+    trajectory.joint_trajectory.joint_names = rjc_min.joint_state.name;
 
+    std::vector<double> joint_positions;
     std::vector<double> joint_diffs;
-    for (auto i = 0; i < goal->initial_state.joint_state.name.size(); ++i) {
-      joint_diffs.push_back(goal->constraints.hard_joint_constraints[0].min.joint_state.position[i] -
-                            goal->initial_state.joint_state.position[i]);
+    for (auto i = 0; i < rjc_min.joint_state.name.size(); ++i) {
+      const auto it = std::find(initial_state.joint_state.name.begin(),
+                                initial_state.joint_state.name.end(),
+                                rjc_min.joint_state.name[i]);
+      const auto index = std::distance(initial_state.joint_state.name.begin(), it);
+      joint_positions.push_back(initial_state.joint_state.position[index]);
+      joint_diffs.push_back(rjc_min.joint_state.position[i] - initial_state.joint_state.position[index]);
     }
-    // Since only X is tweaked in the test, process only X
-    const double odom_x_diff =
-        goal->constraints.hard_joint_constraints[0].min.multi_dof_joint_state.transforms[0].translation.x -
-        goal->initial_state.multi_dof_joint_state.transforms[0].translation.x;
 
-    constexpr double kTrajectoryDuration = 1.5;
-    for (double time_from_start = 0.1; time_from_start < kTrajectoryDuration; time_from_start += 0.1) {
+    trajectory.multi_dof_joint_trajectory.joint_names = initial_state.multi_dof_joint_state.joint_names;
+    const double odom_x_diff = rjc_min.multi_dof_joint_state.transforms[0].translation.x
+                             - initial_state.multi_dof_joint_state.transforms[0].translation.x;
+
+    for (double time_from_start = 0.1; time_from_start < trajectory_duration_; time_from_start += 0.1) {
       trajectory_msgs::msg::JointTrajectoryPoint joint_point;
-      const double progress = time_from_start / kTrajectoryDuration;
-      for (auto i = 0; i < goal->initial_state.joint_state.name.size(); ++i) {
-        joint_point.positions.push_back(goal->initial_state.joint_state.position[i] + progress * joint_diffs[i]);
+      const double progress = time_from_start / trajectory_duration_;
+      for (auto i = 0; i < rjc_min.joint_state.name.size(); ++i) {
+        joint_point.positions.push_back(joint_positions[i] + progress * joint_diffs[i]);
       }
       joint_point.time_from_start = rclcpp::Duration::from_seconds(time_from_start);
       trajectory.joint_trajectory.points.push_back(joint_point);
 
+      // Since the test only manipulates x, only process x
       trajectory_msgs::msg::MultiDOFJointTrajectoryPoint base_point;
-      base_point.transforms = goal->initial_state.multi_dof_joint_state.transforms;
+      base_point.transforms = initial_state.multi_dof_joint_state.transforms;
       base_point.transforms[0].translation.x += odom_x_diff * progress;
       base_point.time_from_start = rclcpp::Duration::from_seconds(time_from_start);
       trajectory.multi_dof_joint_trajectory.points.push_back(base_point);
@@ -143,6 +153,9 @@ class DummyGenerator : public DummyBase<tmc_planning_msgs::action::GenerateRobot
     result->robot_trajectories.push_back(trajectory);
     return result;
   }
+
+ private:
+  double trajectory_duration_;
 };
 
 class DummyEvaluator : public DummyBase<tmc_planning_msgs::action::EvaluateRobotTrajectories> {
@@ -203,6 +216,15 @@ bool CheckTrajectory(const trajectory_msgs::msg::JointTrajectory& trajectory,
   auto last_point = trajectory.points.back();
   EXPECT_NEAR(last_point.positions[index], check_value, error);
   return true;
+}
+
+sensor_msgs::msg::JointState GenerateTestJointStateState(double arm_flex_position = 0.0) {
+  sensor_msgs::msg::JointState joint_state;
+  joint_state.name = {"head_pan_joint", "head_tilt_joint", "arm_lift_joint", "arm_flex_joint",
+                      "arm_roll_joint", "wrist_flex_joint", "wrist_roll_joint", "hand_motor_joint"};
+  joint_state.position = {0.0, 0.0, 0.0, arm_flex_position, 0.0, 0.0, 0.0, 0.0};
+  joint_state.velocity = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  return joint_state;
 }
 }  // namespace
 
@@ -266,7 +288,7 @@ class RobotLocalPlannerNodeWithActionTest : public ::testing::Test {
 
   rclcpp::Publisher<tmc_planning_msgs::msg::RobotLocalGoal>::SharedPtr constraints_publisher_;
   void PublishRobotLocalGoal(const tmc_planning_msgs::msg::RangeJointConstraint& rjc,
-                             bool enable_arm, bool enable_head, bool enable_gripper, bool enable_base,
+                             bool enable_base,
                              const std::string& id = "");
 
   tmc_planning_msgs::msg::RangeJointConstraint rjc_;
@@ -378,11 +400,7 @@ void RobotLocalPlannerNodeWithActionTest::WaitForTimeout(double timeout) {
 }
 
 void RobotLocalPlannerNodeWithActionTest::PublishRobotState(double arm_flex_position) {
-  sensor_msgs::msg::JointState joint_state;
-  joint_state.name = {"head_pan_joint", "head_tilt_joint", "arm_lift_joint", "arm_flex_joint",
-                      "arm_roll_joint", "wrist_flex_joint", "wrist_roll_joint", "hand_motor_joint"};
-  joint_state.position = {0.0, 0.0, 0.0, arm_flex_position, 0.0, 0.0, 0.0, 0.0};
-  joint_state.velocity = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  const auto joint_state = GenerateTestJointStateState(arm_flex_position);
 
   control_msgs::msg::JointTrajectoryControllerState base_state;
   base_state.joint_names = {"odom_x", "odom_y", "odom_t"};
@@ -391,7 +409,7 @@ void RobotLocalPlannerNodeWithActionTest::PublishRobotState(double arm_flex_posi
   base_state.actual.positions = {0.0, 0.0, 0.0};
   base_state.actual.velocities = {0.0, 0.0, 0.0};
 
-  // There is no way to detect the optimization node that has received the topic, so make a proper number of times.
+  // There is no way to detect that the optimization node has received the topic, so run it an appropriate number of times
   for (auto i = 0; i < 20; i++) {
     joint_state_publisher_->publish(joint_state);
     base_state_publisher_->publish(base_state);
@@ -401,21 +419,18 @@ void RobotLocalPlannerNodeWithActionTest::PublishRobotState(double arm_flex_posi
 
 void RobotLocalPlannerNodeWithActionTest::PublishRobotLocalGoal(
     const tmc_planning_msgs::msg::RangeJointConstraint& rjc,
-    bool enable_arm, bool enable_head, bool enable_gripper, bool enable_base,
+    bool enable_base,
     const std::string& id) {
   tmc_planning_msgs::msg::RobotLocalGoal goal;
   goal.id = id;
   goal.constraints.hard_joint_constraints = {rjc};
   goal.normalized_velocity = 0.5;
-  goal.enable_arm = enable_arm;
-  goal.enable_head = enable_head;
-  goal.enable_gripper = enable_gripper;
   goal.enable_base = enable_base;
   constraints_publisher_->publish(goal);
 }
 
 TEST_F(RobotLocalPlannerNodeWithActionTest, AllTrajectoryPub) {
-  PublishRobotLocalGoal(rjc_, true, true, true, true);
+  PublishRobotLocalGoal(rjc_, true);
   EXPECT_TRUE(planner_status_sub_->WaitFor(tmc_planning_msgs::msg::RobotLocalPlannerStatus::SUCCESS,
                                            std::bind(&RobotLocalPlannerNodeWithActionTest::SpinSome, this)));
 
@@ -432,8 +447,48 @@ TEST_F(RobotLocalPlannerNodeWithActionTest, AllTrajectoryPub) {
   EXPECT_TRUE(CheckTrajectory(arm_trajectory_->GetValue(), "arm_flex_joint", -1.57, kEpsilon));
 }
 
+TEST_F(RobotLocalPlannerNodeWithActionTest, RemainingTrajectoryChecking) {
+  // Generate only the trajectory point where arm_flex_joint becomes -1.0 at time 0.1
+  generator_->set_trajectory_duration(0.157);
+
+  PublishRobotLocalGoal(rjc_, false, "test_goal");
+
+  // The above trajectory comes in -> Skip the next loop -> The robot state is not updated, so the operation is not completed -> The trajectory comes in again
+  // Therefore, the number of times the trajectory comes in is half the state of RobotLocalPlanner
+  const auto timeout = server_node_->now() + rclcpp::Duration::from_seconds(2.0);
+  auto trajectory_stamp = builtin_interfaces::msg::Time();
+  auto trajectory_count = 0;
+  auto status_stamp = builtin_interfaces::msg::Time();
+  auto status_count = 0;
+  while (rclcpp::ok() && server_node_->now() < timeout) {
+    if (arm_trajectory_->IsSubscribed()) {
+      const auto current_stamp = arm_trajectory_->GetValue().header.stamp;
+      if (current_stamp.sec != trajectory_stamp.sec || current_stamp.nanosec != trajectory_stamp.nanosec) {
+        trajectory_stamp = current_stamp;
+        trajectory_count++;
+      }
+    }
+    if (planner_status_sub_->IsSubscribed()) {
+      const auto status = planner_status_sub_->GetValue();
+      if (status.planner_status == tmc_planning_msgs::msg::RobotLocalPlannerStatus::SUCCESS) {
+        const auto current_stamp = planner_status_sub_->GetValue().header.stamp;
+        if (current_stamp.sec != status_stamp.sec || current_stamp.nanosec != status_stamp.nanosec) {
+          status_stamp = current_stamp;
+          status_count++;
+        }
+      }
+    }
+    SpinSome();
+  }
+  EXPECT_NEAR(trajectory_count * 2, status_count, 1);
+
+  // The next loop that was skipped is judged by the robot state, so if updated, the operation will be completed
+  PublishRobotState(-1.57);
+  WaitFor(true);
+}
+
 TEST_F(RobotLocalPlannerNodeWithActionTest, DisplacementWithCurrentState) {
-  // Overwrite the parameters and re -initialize
+  // Overwrite parameters and reinitialize
   is_client_interrupt_ = true;
   client_thread_.join();
 
@@ -449,20 +504,23 @@ TEST_F(RobotLocalPlannerNodeWithActionTest, DisplacementWithCurrentState) {
 
   PublishRobotState();
 
-  // Since Jointstate is not updated, the operation should not be completed
-  PublishRobotLocalGoal(rjc_, true, true, true, true);
+  // Since JointState is not updated, the operation should not be completed
+  PublishRobotLocalGoal(rjc_, true);
   EXPECT_TRUE(planner_status_sub_->WaitFor(tmc_planning_msgs::msg::RobotLocalPlannerStatus::SUCCESS,
                                            std::bind(&RobotLocalPlannerNodeWithActionTest::SpinSome, this)));
 
   WaitForTimeout(7.0);
 
-  // If you update Jointstate, the operation should be completed
+  // If JointState is updated, the operation should be completed
   PublishRobotState(-1.57);
   WaitFor(true);
 }
 
 TEST_F(RobotLocalPlannerNodeWithActionTest, ArmTrajectoryPub) {
-  PublishRobotLocalGoal(rjc_, true, false, false, false);
+  const auto rjc = RemoveJointsFromRangeJointConstraint(
+      rjc_, {"head_pan_joint", "head_tilt_joint", "hand_motor_joint"});
+
+  PublishRobotLocalGoal(rjc, false);
 
   WaitFor(false);
   WaitFor(true);
@@ -476,9 +534,12 @@ TEST_F(RobotLocalPlannerNodeWithActionTest, ArmTrajectoryPub) {
 }
 
 TEST_F(RobotLocalPlannerNodeWithActionTest, HeadTrajectoryPub) {
-  rjc_.min.joint_state.position = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.57, 0.0};
-  rjc_.max = rjc_.min;
-  PublishRobotLocalGoal(rjc_, false, true, false, false);
+  auto rjc = RemoveJointsFromRangeJointConstraint(
+      rjc_, {"arm_lift_joint", "arm_flex_joint", "arm_roll_joint", "wrist_flex_joint", "wrist_roll_joint",
+             "hand_motor_joint"});
+  rjc = UpdateGoalPositionsInRangeJointConstraint(rjc, "head_pan_joint", 1.57);
+
+  PublishRobotLocalGoal(rjc, false);
 
   WaitFor(false);
   WaitFor(true);
@@ -492,9 +553,12 @@ TEST_F(RobotLocalPlannerNodeWithActionTest, HeadTrajectoryPub) {
 }
 
 TEST_F(RobotLocalPlannerNodeWithActionTest, HandTrajectoryPub) {
-  rjc_.min.joint_state.position = {0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0};
-  rjc_.max = rjc_.min;
-  PublishRobotLocalGoal(rjc_, false, false, true, false);
+  auto rjc = RemoveJointsFromRangeJointConstraint(
+      rjc_, {"arm_lift_joint", "arm_flex_joint", "arm_roll_joint", "wrist_flex_joint", "wrist_roll_joint",
+             "head_pan_joint", "head_tilt_joint"});
+  rjc = UpdateGoalPositionsInRangeJointConstraint(rjc, "hand_motor_joint", 1.0);
+
+  PublishRobotLocalGoal(rjc, false);
 
   WaitFor(false);
   WaitFor(true);
@@ -508,16 +572,20 @@ TEST_F(RobotLocalPlannerNodeWithActionTest, HandTrajectoryPub) {
 }
 
 TEST_F(RobotLocalPlannerNodeWithActionTest, BaseTrajectoryPub) {
+  auto rjc = RemoveJointsFromRangeJointConstraint(
+      rjc_, {"arm_lift_joint", "arm_flex_joint", "arm_roll_joint", "wrist_flex_joint", "wrist_roll_joint",
+             "head_pan_joint", "head_tilt_joint", "hand_motor_joint"});
+
   geometry_msgs::msg::Transform transform;
   transform.translation.x = 1.0;
   transform.rotation.w = 1.0;
-  rjc_.min.multi_dof_joint_state.transforms[0] = transform;
-  rjc_.max = rjc_.min;
-  PublishRobotLocalGoal(rjc_, false, false, false, true);
+  rjc.min.multi_dof_joint_state.transforms[0] = transform;
+  rjc.max = rjc.min;
+  PublishRobotLocalGoal(rjc, true);
 
   WaitFor(base_trajectory_);
 
-  // Default parameters that use acceleration to delete several orbit points
+  // Default parameters to delete several trajectory points using acceleration
   double d = 0.5 * 0.5 * std::pow(0.2, 2);
   EXPECT_GT(base_trajectory_->GetValue().points[0].positions[0], d);
 
@@ -531,9 +599,10 @@ TEST_F(RobotLocalPlannerNodeWithActionTest, BaseTrajectoryPub) {
 }
 
 TEST_F(RobotLocalPlannerNodeWithActionTest, StopTrajectoryPub) {
-  PublishRobotLocalGoal(rjc_, true, true, true, true);
+  auto rjc = RemoveJointsFromRangeJointConstraint(rjc_, {"head_pan_joint", "head_tilt_joint"});
 
-  WaitFor(head_trajectory_);
+  PublishRobotLocalGoal(rjc, true);
+
   WaitFor(arm_trajectory_);
   WaitFor(hand_trajectory_);
   WaitFor(base_trajectory_);
@@ -547,20 +616,73 @@ TEST_F(RobotLocalPlannerNodeWithActionTest, StopTrajectoryPub) {
     SpinSome();
   }
 
-  // The stop trajectory is issued, but the gripper does not work because it may drop the ingredient if you move it poorly.
-  EXPECT_TRUE(head_trajectory_->IsSubscribed());
+  // Only the stop trajectory is issued to the controller used for the operation,
   EXPECT_TRUE(arm_trajectory_->IsSubscribed());
+  EXPECT_TRUE(hand_trajectory_->IsSubscribed());
   EXPECT_TRUE(base_trajectory_->IsSubscribed());
 
-  EXPECT_TRUE(head_trajectory_->GetValue().points.empty());
   EXPECT_TRUE(arm_trajectory_->GetValue().points.empty());
+  EXPECT_TRUE(hand_trajectory_->GetValue().points.empty());
   EXPECT_TRUE(base_trajectory_->GetValue().points.empty());
 
+  EXPECT_FALSE(head_trajectory_->IsSubscribed());
+}
+
+TEST_F(RobotLocalPlannerNodeWithActionTest, StopTrajectoryPubMultipleCommands) {
+  auto rjc = RemoveJointsFromRangeJointConstraint(rjc_, {"head_pan_joint", "head_tilt_joint"});
+
+  PublishRobotLocalGoal(rjc, true, "first");
+
+  WaitFor(arm_trajectory_);
+  WaitFor(hand_trajectory_);
+  WaitFor(base_trajectory_);
+
+  EXPECT_TRUE(arm_trajectory_->IsSubscribed());
+  EXPECT_TRUE(hand_trajectory_->IsSubscribed());
+  EXPECT_TRUE(base_trajectory_->IsSubscribed());
+  EXPECT_FALSE(head_trajectory_->IsSubscribed());
+
+  EXPECT_FALSE(arm_trajectory_->GetValue().points.empty());
   EXPECT_FALSE(hand_trajectory_->GetValue().points.empty());
+  EXPECT_FALSE(base_trajectory_->GetValue().points.empty());
+
+  // Throw a new command that does not move the base and gripper
+  rjc = RemoveJointsFromRangeJointConstraint(rjc, {"hand_motor_joint"});
+  PublishRobotLocalGoal(rjc, false, "second");
+
+  // Only the stop command for the base should come
+  auto timeout = server_node_->now() + rclcpp::Duration::from_seconds(1.0);
+  while (rclcpp::ok() &&
+         server_node_->now() < timeout &&
+         !base_trajectory_->GetValue().points.empty() &&
+         !hand_trajectory_->GetValue().points.empty()) {
+    SpinSome();
+  }
+  EXPECT_FALSE(arm_trajectory_->GetValue().points.empty());
+  EXPECT_TRUE(hand_trajectory_->GetValue().points.empty());
+  EXPECT_TRUE(base_trajectory_->GetValue().points.empty());
+
+  hand_trajectory_ = std::make_shared<TrajectorySubscriber>(server_node_, "gripper_controller/joint_trajectory");
+  base_trajectory_ = std::make_shared<TrajectorySubscriber>(server_node_, "omni_base_controller/joint_trajectory");
+
+  // Throw an empty constraint
+  tmc_planning_msgs::msg::RobotLocalGoal goal;
+  constraints_publisher_->publish(goal);
+
+  timeout = server_node_->now() + rclcpp::Duration::from_seconds(1.0);
+  while (rclcpp::ok() && server_node_->now() < timeout) {
+    SpinSome();
+  }
+  // Only the stop trajectory is issued to the controller used for the operation,
+  EXPECT_TRUE(arm_trajectory_->GetValue().points.empty());
+
+  EXPECT_FALSE(hand_trajectory_->IsSubscribed());
+  EXPECT_FALSE(base_trajectory_->IsSubscribed());
+  EXPECT_FALSE(head_trajectory_->IsSubscribed());
 }
 
 TEST_F(RobotLocalPlannerNodeWithActionTest, ChangeConstraintsPub) {
-  PublishRobotLocalGoal(rjc_, true, true, true, true, "first");
+  PublishRobotLocalGoal(rjc_, true, "first");
 
   WaitFor(head_trajectory_);
 
@@ -570,10 +692,10 @@ TEST_F(RobotLocalPlannerNodeWithActionTest, ChangeConstraintsPub) {
     EXPECT_EQ(displacements.id, "first");
   }
 
-  // Throw a constraint of another command when moving
+  // Throw a constraint of a different command while moving
   rjc_.min.joint_state.position = {0.0, 0.0, 0.0, -1.57, 0.0, 0.0, 0.0, 0.0};
   rjc_.max = rjc_.min;
-  PublishRobotLocalGoal(rjc_, true, true, true, true, "second");
+  PublishRobotLocalGoal(rjc_, true, "second");
 
   WaitFor(true);
 
@@ -581,7 +703,6 @@ TEST_F(RobotLocalPlannerNodeWithActionTest, ChangeConstraintsPub) {
     const auto displacements = displacements_cache_->GetValue();
     EXPECT_EQ(displacements.id, "second");
   }
-
 
   EXPECT_TRUE(head_trajectory_->IsSubscribed());
   EXPECT_TRUE(arm_trajectory_->IsSubscribed());
@@ -608,11 +729,11 @@ TEST_F(RobotLocalPlannerNodeWithActionTest, ChangeConstraintsPub) {
   EXPECT_LT(second_running_stamps.back(), second_done_stamps.front());
 }
 
-// Patterns that fail in the first PlanPath and succeed in the second time
+// Pattern where the first PlanPath fails and the second succeeds
 TEST_F(RobotLocalPlannerNodeWithActionTest, FailFirstTimeSucceedSecondTime) {
   generator_->SetDoAbort(true);
 
-  PublishRobotLocalGoal(rjc_, true, true, true, true);
+  PublishRobotLocalGoal(rjc_, true);
   EXPECT_TRUE(planner_status_sub_->WaitFor(tmc_planning_msgs::msg::RobotLocalPlannerStatus::GENERATION_FAILURE,
                                            std::bind(&RobotLocalPlannerNodeWithActionTest::SpinSome, this)));
   const auto start = server_node_->now();
@@ -644,6 +765,23 @@ TEST_F(RobotLocalPlannerNodeWithActionTest, FailFirstTimeSucceedSecondTime) {
   EXPECT_TRUE(base_trajectory_->IsSubscribed());
 
   EXPECT_TRUE(CheckTrajectory(arm_trajectory_->GetValue(), "arm_flex_joint", -1.57, kEpsilon));
+}
+
+// Invalid joint state
+TEST_F(RobotLocalPlannerNodeWithActionTest, InvalidJointState) {
+  auto joint_state = GenerateTestJointStateState();
+  joint_state.name.pop_back();
+  joint_state.position.pop_back();
+  joint_state.velocity.pop_back();
+  // Spin appropriately
+  for (auto i = 0; i < 20; i++) {
+    joint_state_publisher_->publish(joint_state);
+    SpinSome();
+  }
+
+  PublishRobotLocalGoal(rjc_, true);
+  EXPECT_TRUE(planner_status_sub_->WaitFor(tmc_planning_msgs::msg::RobotLocalPlannerStatus::INVALID_INPUT_ROBOT_STATE,
+                                           std::bind(&RobotLocalPlannerNodeWithActionTest::SpinSome, this)));
 }
 
 }  // namespace hsrb_robot_local_planner_node

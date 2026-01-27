@@ -25,7 +25,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 */
-/// @brief Athletic for acceleration calculation in bogies after HSR-B
+/// @brief Kinematics for acceleration calculation in carts from HSR-B onwards
 #ifndef HSRB_QUICK_PATH_OPTIMIZER_BASE_KINEMATICS_
 #define HSRB_QUICK_PATH_OPTIMIZER_BASE_KINEMATICS_
 
@@ -37,51 +37,51 @@ DAMAGE.
 
 namespace hsrb_quick_path_optimizer {
 
-// Bogie speed / acceleration limit
+// Speed and acceleration limits of the cart
 struct BaseJointLimits {
-  // Speed ​​limit of turning axis [M/S]
+  // Speed limit of the turning axis [m/s]
   double caster_velocity;
-  // Wheel speed limit [M/S
+  // Speed limit of the wheels [m/s]
   double wheel_velocity;
-  // Acceleration limit of turning axis [M/S^2]
+  // Acceleration limit of the turning axis [m/s^2]
   double caster_acceleration;
-  // Wheel acceleration limit [M/S^2]
+  // Acceleration limit of the wheels [m/s^2]
   double wheel_acceleration;
 
   // Initialize with HSR-B parameters
   BaseJointLimits();
 };
 
-// Dimensions of bogie
+// Dimension information of the cart
 struct OmniBaseSize : public hsrb_base_controllers::OmniBaseSize {
   // Initialize with HSR-B parameters
   OmniBaseSize();
 };
 
-// Bog motor for acceleration calculation
+// Cart kinematics for acceleration calculation
 class BaseKinematics {
  public:
   using Ptr = std::shared_ptr<BaseKinematics>;
 
-  // constructor
+  // Constructor
   BaseKinematics(const BaseJointLimits& joint_limits,
                  const OmniBaseSize& omni_base_size);
   virtual ~BaseKinematics() = default;
 
-  // Calculate the maximum speed when going in the target direction considering the current bogie state
-  // @param[in] ORIGIN_TO_BASE_YAW ORIGIN's reference yaw component [RAD]
-  // @param[in] ORIGIN_TO_TARGET_DIRECTION ORIGIN Speed ​​direction [RAD]
-  // @param[in] Base_roll_Joint Table Rotary Alarm [RAD]
-  // @return Eigen :: Vector3d Origin Maximum speed x, y, yaw
+  // Calculate the maximum speed towards the target direction considering the current cart state
+  // @param[in] origin_to_base_yaw  Yaw component of the cart posture based on origin [rad]
+  // @param[in] origin_to_target_direction  Desired speed direction based on origin [rad]
+  // @param[in] base_roll_joint  Cart axis turning angle [rad]
+  // @return Eigen::Vector3d  Maximum speed x, y, yaw based on origin
   Eigen::Vector3d CalculateBaseMaxVelocity(
       double origin_to_base_yaw, double origin_to_target_direction, double base_roll_joint) const;
 
-  // Calculate the maximum acceleration when going in the target direction considering the current bogie state
-  // @param[in] ORIGIN_TO_BASE_YAW ORIGIN's reference yaw component [RAD]
-  // @param[in] ORIGIN_TO_TARGET_DIRECTION ORIGIN Against acceleration direction [RAD]
-  // @param[in] Base_roll_Joint Table Rotary Alarm [RAD]
-  // @param[in] Joint_velocities speed of right wheels, left wheels, turning axis speed [RAD/S
-  // @return Eigen :: Vector3d Origin Maximum acceleration x, y, yaw
+  // Calculate the maximum acceleration towards the target direction considering the current cart state
+  // @param[in] origin_to_base_yaw  Yaw component of the cart posture based on origin [rad]
+  // @param[in] origin_to_target_direction  Desired acceleration direction based on origin [rad]
+  // @param[in] base_roll_joint  Cart axis turning angle [rad]
+  // @param[in] joint_velocities  Speeds of the right wheel, left wheel, and turning axis [rad/sec]
+  // @return Eigen::Vector3d  Maximum acceleration x, y, yaw based on origin
   Eigen::Vector3d CalculateBaseMaxAcceleration(
       double origin_to_base_yaw, double origin_to_target_direction,
       double base_roll_joint, const Eigen::Vector3d& joint_velocities) const;

@@ -1,6 +1,16 @@
 # hsrb_robot_local_planner
-
 ROS 2 Humble向けの HSR-B 用ローカルプランナー（Robot Local Planner）と、それをPythonからインタラクティブに操作するためのインターフェースパッケージです。
+
+[[`Base_code`](https://github.com/hsr-project/hsrb_robot_local_planner)]
+[[`Project_page`](https://toyotafrc.github.io/RobotLocalPlanner-Proj/)]
+
+<!-- docs/robot_local_planner_system_overview.mp4) -->
+<video controls>
+    <source src="docs/robot_local_planner_system_overview.mp4" type="video/mp4">
+</video>
+
+
+
 
 このリポジトリは以下の2つの主要パッケージで構成されています。
 - `hsrb_robot_local_planner_node`: Gazeboシミュレータ等の HSR-B と連携し、ローカルパス計画および軌道生成を行うROS 2ノード。

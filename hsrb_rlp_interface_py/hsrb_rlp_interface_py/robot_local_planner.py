@@ -96,11 +96,11 @@ def _create_constraints(
                        soft_path_joint_constraints=spjc)
 
 
-def _lookup_odom_to_ref(tf_buffer, ref_frame_id, stamp):
+def _lookup_odom_to_ref(tf_buffer, ref_frame_id):
     odom_to_ref_ros = tf_buffer.lookup_transform(
         ODOM,
         ref_frame_id,
-        stamp,
+        rclpy.time.Time(),
         rclpy.duration.Duration(seconds=TF_TIMEOUT)).transform
     odom_to_ref_tuples = transform_to_tuples(odom_to_ref_ros)
     return tuples_to_pose(odom_to_ref_tuples)
@@ -210,7 +210,7 @@ class RobotLocalPlanner(Node):
         if ref_frame_id is None:
             ref_frame_id = BASE
 
-        odom_to_ref_pose = _lookup_odom_to_ref(self._tf2_buffer, ref_frame_id, self.get_clock().now())
+        odom_to_ref_pose = _lookup_odom_to_ref(self._tf2_buffer, ref_frame_id)
         ref_to_hand_pose = tuples_to_pose(pose)
 
         tsr = self._create_task_space_region(odom_to_ref_pose,

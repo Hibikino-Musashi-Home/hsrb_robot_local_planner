@@ -5,10 +5,12 @@ ROS 2 Humble向けの HSR-B 用ローカルプランナー（Robot Local Planner
 [[`Project_page`](https://toyotafrc.github.io/RobotLocalPlanner-Proj/)]
 
 <!-- docs/robot_local_planner_system_overview.mp4) -->
-<video controls>
+<!-- <video controls>
     <source src="docs/robot_local_planner_system_overview.mp4" type="video/mp4">
-</video>
+</video> -->
 
+
+https://github.com/user-attachments/assets/6d74dce5-e679-49f1-855e-3191f10acc53
 
 
 

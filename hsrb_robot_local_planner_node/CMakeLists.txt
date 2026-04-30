@@ -67,6 +67,10 @@ install(TARGETS node_with_action node_with_plugin ${PROJECT_NAME}_lib plugins_fo
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)
+
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(tmc_manipulation_tests REQUIRED)

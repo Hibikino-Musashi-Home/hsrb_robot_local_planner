@@ -17,7 +17,7 @@ def declare_arguments():
     return [
         DeclareLaunchArgument(
             'use_sim_time',
-            default_value='true',
+            default_value='false',
             description='Use simulation clock if true'),
         DeclareLaunchArgument(
             'description_package',

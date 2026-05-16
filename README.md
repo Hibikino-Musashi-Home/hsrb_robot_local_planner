@@ -18,6 +18,41 @@ https://github.com/user-attachments/assets/6d74dce5-e679-49f1-855e-3191f10acc53
 - `hsrb_robot_local_planner_node`: Gazeboシミュレータ等の HSR-B と連携し、ローカルパス計画および軌道生成を行うROS 2ノード。
 - `hsrb_rlp_interface_py`: Pythonからローカルプランナーにゴールを指示するためのインターフェースと、インタラクティブに操作できるシェル (`irlp`) を提供するパッケージ。
 
+## セットアップ
+```bash
+# まだCloneしていない場合，以下のコマンドでClone
+git clone -b humble --recursive https://github.com/hsr-project/tmc_manipulation_local_planner.git
+```
+
+### tmc_planning_msgs の修正
+
+`tmc_robot_local_planner` が期待するフィールドが `tmc_planning_msgs` の定義に不足しているため、以下のファイルを手動で修正する必要があります。
+
+**`tmc_planning_msgs/action/GenerateRobotTrajectories.action`** に `bool enable_base` を追加：
+```
+tmc_planning_msgs/Constraints constraints
+moveit_msgs/RobotState initial_state
+float64 normalized_velocity
+string[] ignore_joints
+bool enable_base          # 追加
+```
+
+**`tmc_planning_msgs/action/ValidateRobotTrajectories.action`** に `moveit_msgs/RobotState initial_state` を追加：
+```
+moveit_msgs/RobotTrajectory[] robot_trajectories
+moveit_msgs/RobotState initial_state          # 追加
+---
+moveit_msgs/RobotTrajectory robot_trajectory
+```
+
+**`tmc_planning_msgs/msg/RobotLocalPlannerStatus.msg`** に `INVALID_INPUT_ROBOT_STATE` 定数を追加：
+```
+int32 OPTIMIZATION_FAILURE=-5
+int32 INVALID_INPUT_ROBOT_STATE=-6          # 追加
+```
+
+修正後、再ビルドしてください
+
 ## ビルド方法
 
 ```bash

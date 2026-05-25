@@ -30,6 +30,11 @@
   <depend>tmc_utils</depend>
   <depend>trajectory_msgs</depend>
 
+  <exec_depend>tmc_simple_path_generator</exec_depend>
+  <exec_depend>tmc_local_path_evaluator</exec_depend>
+  <exec_depend>tmc_collision_detecting_validator</exec_depend>
+  <exec_depend>hsrb_quick_path_optimizer</exec_depend>
+
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>tmc_manipulation_tests</test_depend>
 

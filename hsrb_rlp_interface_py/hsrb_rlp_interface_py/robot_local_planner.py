@@ -68,13 +68,26 @@ ODOM = 'odom'
 WAIT_FOR_COMPLETE_TIMEOUT = 20.0
 
 
+# def _create_robot_local_goal(constraints,
+#                              normalized_velocity=0.5,
+#                              enable_base=True):
+#     return RobotLocalGoal(constraints=constraints,
+#                           normalized_velocity=normalized_velocity,
+#                           enable_base=enable_base)
 def _create_robot_local_goal(constraints,
                              normalized_velocity=0.5,
-                             enable_base=True):
-    return RobotLocalGoal(constraints=constraints,
-                          normalized_velocity=normalized_velocity,
-                          enable_base=enable_base)
-
+                             enable_arm=False,
+                             enable_head=False,
+                             enable_gripper=False,
+                             enable_base=False):
+    return RobotLocalGoal(
+        constraints=constraints,
+        normalized_velocity=normalized_velocity,
+        enable_arm=enable_arm,
+        enable_head=enable_head,
+        enable_gripper=enable_gripper,
+        enable_base=enable_base,
+    )
 
 def _create_constraints(
     hjc=[],
@@ -148,7 +161,14 @@ class RobotLocalPlanner(Node):
         joint_states = self._joint_state_sub.get_joint_state(MOTION_PLANNING_JOINTS)
         rjc = self._create_joint_constraint(joint_states, pose(x, y, 0.0, 0.0, 0.0, yaw), frame_id)
         constraint = _create_constraints(hjc=[rjc])
-        goal = _create_robot_local_goal(constraint)
+        #goal = _create_robot_local_goal(constraint)
+        goal = _create_robot_local_goal(
+            constraint,
+            enable_arm=True,
+            enable_head=True,
+            enable_gripper=True,
+            enable_base=True,
+        )
         return self.publish(goal)
 
     def move_to_joint_positions_with_base_relative(self, joint_goals={},
@@ -168,17 +188,39 @@ class RobotLocalPlanner(Node):
             return
         rjc = self._create_joint_constraint(joint_goals, pose(x, y, 0.0, 0.0, 0.0, yaw), frame_id)
         constraint = _create_constraints(hjc=[rjc])
-        goal = _create_robot_local_goal(constraint, normalized_velocity)
+        #goal = _create_robot_local_goal(constraint, normalized_velocity)
+        goal = _create_robot_local_goal(
+            constraint,
+            normalized_velocity,
+            enable_arm=True,
+            enable_head=True,
+            enable_gripper=('hand_motor_joint' in joint_goals),
+            enable_base=True,
+        )
         return self.publish(goal)
 
+    # def move_to_joint_positions(self, goals={}, normalized_velocity=0.5):
+    #     if not goals:
+    #         return
+    #     rjc = self._create_joint_constraint(joint_goals=goals)
+    #     constraint = _create_constraints(hjc=[rjc])
+    #     goal = _create_robot_local_goal(constraint, normalized_velocity, enable_base=False)
+    #     return self.publish(goal)
     def move_to_joint_positions(self, goals={}, normalized_velocity=0.5):
         if not goals:
             return
+
         rjc = self._create_joint_constraint(joint_goals=goals)
         constraint = _create_constraints(hjc=[rjc])
-        goal = _create_robot_local_goal(constraint, normalized_velocity, enable_base=False)
+        goal = _create_robot_local_goal(
+            constraint,
+            normalized_velocity,
+            enable_arm=True,
+            enable_head=True,
+            enable_gripper=('hand_motor_joint' in goals),
+            enable_base=False,
+        )
         return self.publish(goal)
-
     def move_to_neutral(self):
         goals = {
             'arm_lift_joint': 0.0,
@@ -219,7 +261,15 @@ class RobotLocalPlanner(Node):
                                              max_bounds=max_bounds)
         tlc = self._create_tsr_link_constraint(tsr)
         constraints = _create_constraints(hlc=[tlc])
-        goal = _create_robot_local_goal(constraints, normalized_velocity)
+        #goal = _create_robot_local_goal(constraints, normalized_velocity)
+        goal = _create_robot_local_goal(
+            constraints,
+            normalized_velocity,
+            enable_arm=True,
+            enable_head=False,
+            enable_gripper=False,
+            enable_base=True,
+        )
         return self.publish(goal)
 
     def publish_empty_constraints(self):
@@ -258,16 +308,27 @@ class RobotLocalPlanner(Node):
             #     msg = "`joint_name` must be one of motion planning joints({0})"
             #     raise ValueError(msg.format(self._motion_planning_joints))
 
-        trans = Vector3()
-        rot = Quaternion()
-        rot.w = 1.0
+        # trans = Vector3()
+        # rot = Quaternion()
+        # rot.w = 1.0
+        # if base_goal is not None:
+        #     trans, rot = base_goal
+        # base_to_target_position = Transform(
+        #     translation=Vector3(x=trans.x, y=trans.y, z=trans.z),
+        #     rotation=Quaternion(x=rot.x, y=rot.y, z=rot.z, w=rot.w))
+        # rjc.min.multi_dof_joint_state.transforms.append(base_to_target_position)
+        # rjc.min.multi_dof_joint_state.joint_names.append('world_joint')
+        # rjc.max = rjc.min
+        # return rjc
         if base_goal is not None:
             trans, rot = base_goal
-        base_to_target_position = Transform(
-            translation=Vector3(x=trans.x, y=trans.y, z=trans.z),
-            rotation=Quaternion(x=rot.x, y=rot.y, z=rot.z, w=rot.w))
-        rjc.min.multi_dof_joint_state.transforms.append(base_to_target_position)
-        rjc.min.multi_dof_joint_state.joint_names.append('world_joint')
+            base_to_target_position = Transform(
+                translation=Vector3(x=trans.x, y=trans.y, z=trans.z),
+                rotation=Quaternion(x=rot.x, y=rot.y, z=rot.z, w=rot.w),
+            )
+            rjc.min.multi_dof_joint_state.transforms.append(base_to_target_position)
+            rjc.min.multi_dof_joint_state.joint_names.append('world_joint')
+
         rjc.max = rjc.min
         return rjc
 
@@ -290,8 +351,8 @@ class RobotLocalPlanner(Node):
     def wait_for_complete(self, goal_id, timeout_sec=WAIT_FOR_COMPLETE_TIMEOUT):
         timeout = self.get_clock().now() + rclpy.duration.Duration(seconds=timeout_sec)
         while rclpy.ok() and self.get_clock().now() < timeout:
-            if self.get_constraints_status_by_id(goal_id) in [ConstraintsStatus.SATISFIED,
-                                                              ConstraintsStatus.PREEMPTED]:
+            if self.get_constraints_status_by_id(goal_id) in ConstraintsStatus.SATISFIED
+                                                              #ConstraintsStatus.PREEMPTED]:
                 return True
             self._rate.sleep()
         return False

@@ -34,6 +34,11 @@ DAMAGE.
 #include <algorithm>
 #include <unordered_set>
 
+//一時的に追加
+#include <iomanip>
+#include <sstream>
+//
+
 #include <tf2_eigen/tf2_eigen.hpp>
 
 #include <tmc_manipulation_types/utils.hpp>
@@ -52,6 +57,120 @@ const double kPublishPeriodScale = 5;       // 200msec * 5 = 1.0s
 const char* const kOriginFrame = "odom";
 const char* const kBaseJointName = "world_joint";
 
+//追加
+std::string JoinStrings(const std::vector<std::string>& values, const std::size_t limit = 30) {
+  std::ostringstream oss;
+  oss << "[";
+  for (std::size_t i = 0; i < values.size() && i < limit; ++i) {
+    if (i != 0) {
+      oss << ", ";
+    }
+    oss << values[i];
+  }
+  if (values.size() > limit) {
+    oss << ", ...";
+  }
+  oss << "]";
+  return oss.str();
+}
+
+template <typename T>
+std::string JoinValues(const std::vector<T>& values, const std::size_t limit = 30) {
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(4);
+  oss << "[";
+  for (std::size_t i = 0; i < values.size() && i < limit; ++i) {
+    if (i != 0) {
+      oss << ", ";
+    }
+    oss << values[i];
+  }
+  if (values.size() > limit) {
+    oss << ", ...";
+  }
+  oss << "]";
+  return oss.str();
+}
+
+void LogRobotLocalGoalMsg(
+    const rclcpp::Logger& logger,
+    const tmc_planning_msgs::msg::RobotLocalGoal& goal,
+    const char* label) {
+  RCLCPP_INFO(
+      logger,
+      "[RLP_DEBUG] %s goal id=%s normalized_velocity=%.3f enable_arm=%d enable_head=%d enable_gripper=%d enable_base=%d",
+      label,
+      goal.id.c_str(),
+      goal.normalized_velocity,
+      goal.enable_arm,
+      goal.enable_head,
+      goal.enable_gripper,
+      goal.enable_base);
+
+  RCLCPP_INFO(
+      logger,
+      "[RLP_DEBUG] %s constraints count hard_joint=%zu hard_link=%zu soft_joint=%zu soft_link=%zu hard_path_link=%zu soft_path_joint=%zu",
+      label,
+      goal.constraints.hard_joint_constraints.size(),
+      goal.constraints.hard_link_constraints.size(),
+      goal.constraints.soft_joint_constraints.size(),
+      goal.constraints.soft_link_constraints.size(),
+      goal.constraints.hard_path_link_constraints.size(),
+      goal.constraints.soft_path_joint_constraints.size());
+
+  if (!goal.constraints.hard_joint_constraints.empty()) {
+    const auto& hjc = goal.constraints.hard_joint_constraints.front();
+
+    RCLCPP_INFO(
+        logger,
+        "[RLP_DEBUG] %s hard_joint[0] frame=%s min_names=%s min_pos=%s max_pos=%s min_mdof_names=%s min_mdof_transforms=%zu",
+        label,
+        hjc.header.frame_id.c_str(),
+        JoinStrings(hjc.min.joint_state.name).c_str(),
+        JoinValues(hjc.min.joint_state.position).c_str(),
+        JoinValues(hjc.max.joint_state.position).c_str(),
+        JoinStrings(hjc.min.multi_dof_joint_state.joint_names).c_str(),
+        hjc.min.multi_dof_joint_state.transforms.size());
+  }
+}
+
+void LogJointTrajectoryMsg(
+    const rclcpp::Logger& logger,
+    const trajectory_msgs::msg::JointTrajectory& trajectory,
+    const char* label) {
+  RCLCPP_INFO(
+      logger,
+      "[RLP_DEBUG] %s joint_trajectory names=%s points=%zu stamp=%d.%09u",
+      label,
+      JoinStrings(trajectory.joint_names).c_str(),
+      trajectory.points.size(),
+      trajectory.header.stamp.sec,
+      trajectory.header.stamp.nanosec);
+
+  if (!trajectory.points.empty()) {
+    const auto& first = trajectory.points.front();
+    const auto& last = trajectory.points.back();
+
+    RCLCPP_INFO(
+        logger,
+        "[RLP_DEBUG] %s first_point positions=%s velocities=%s time=%d.%09u",
+        label,
+        JoinValues(first.positions).c_str(),
+        JoinValues(first.velocities).c_str(),
+        first.time_from_start.sec,
+        first.time_from_start.nanosec);
+
+    RCLCPP_INFO(
+        logger,
+        "[RLP_DEBUG] %s last_point positions=%s velocities=%s time=%d.%09u",
+        label,
+        JoinValues(last.positions).c_str(),
+        JoinValues(last.velocities).c_str(),
+        last.time_from_start.sec,
+        last.time_from_start.nanosec);
+  }
+}
+//ここまで
 bool OverwriteRobotState(const tmc_manipulation_types::RobotState& source,
                          tmc_manipulation_types::RobotState& target_out) {
   for (uint32_t i = 0; i < source.joint_state.name.size(); ++i) {
@@ -128,7 +247,7 @@ void RobotLocalPlannerNodeBase::InitializeRosInterfaces(const rclcpp::Node::Shar
   base_controller_state_sub_ = node->create_subscription<control_msgs::msg::JointTrajectoryControllerState>(
       "base_trajectory_controller_state", tmc_utils::BestEffortQoS(),
       std::bind(&RobotLocalPlannerNodeBase::BaseControllerStateCallback, this, std::placeholders::_1));
-
+  // pythonで送られてきたgoalを受け取る
   constraint_sub_ = node->create_subscription<tmc_planning_msgs::msg::RobotLocalGoal>(
       "~/constraints", tmc_utils::ReliableVolatileQoS(),
       std::bind(&RobotLocalPlannerNodeBase::ConstraintCallback, this, std::placeholders::_1));
@@ -180,7 +299,14 @@ void RobotLocalPlannerNodeBase::Execute() {
     constraints_are_changed = constraints_are_changed_;
     constraints_are_changed_ = false;
   }
-
+  //追加
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "[RLP_DEBUG] Execute goal id=%s changed=%d empty=%d normalized_velocity=%.3f enable_base=%d",
+                       goal_constraints.id.c_str(),
+                       constraints_are_changed,
+                       goal_constraints.IsEmpty(),
+                       goal_constraints.normalized_velocity,
+                       goal_constraints.enable_base);
+  //
   // Stop if the constraint is empty
   if (goal_constraints.IsEmpty()) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 60000, "constraints are empty");
@@ -264,8 +390,25 @@ void RobotLocalPlannerNodeBase::Execute() {
   }
 
   // Trajectory generation
+  // const auto [trajectory, error_code] = PlanImpl(previous_trajectory, initial_state, goal_constraints);
+  // status_pub_->Publish(error_code);
+
+  //上記を変更
   const auto [trajectory, error_code] = PlanImpl(previous_trajectory, initial_state, goal_constraints);
+
+  RCLCPP_INFO_THROTTLE(
+      this->get_logger(),
+      *this->get_clock(),
+      1000,
+      "[RLP_DEBUG] PlanImpl result goal id=%s error_code=%d joint_names=%s joint_points=%zu multi_dof_points=%zu",
+      goal_constraints.id.c_str(),
+      static_cast<int>(error_code),
+      JoinStrings(trajectory.joint_trajectory.joint_names).c_str(),
+      trajectory.joint_trajectory.points.size(),
+      trajectory.multi_dof_joint_trajectory.points.size());
+
   status_pub_->Publish(error_code);
+  //ここまで
 
   if (error_code != tmc_robot_local_planner::RobotLocalPlannerErrorCode::kSuccess) {
     RCLCPP_ERROR(this->get_logger(), "Fail to plan path.");
@@ -281,11 +424,21 @@ void RobotLocalPlannerNodeBase::Execute() {
   tmc_robot_local_planner_utils::DeleteTrajectoryPointsAtTime(kConnectPoint * kPublishPeriodScale, publish_solution);
 
   // Convert to JointTrajectoryMsg and issue
+  // trajectory_msgs::msg::JointTrajectory joint_trajectory_msg;
+  // tmc_manipulation_types_bridge::TimedJointTrajectoryToJointTrajectoryMsg(
+  //     publish_solution.joint_trajectory, joint_trajectory_msg);
+  // joint_trajectory_msg.header.stamp = connectable_time;
+  // joint_trajectories_pub_->PublishJointTrajectory(joint_trajectory_msg, joint_state_msg);
+  //変更
   trajectory_msgs::msg::JointTrajectory joint_trajectory_msg;
   tmc_manipulation_types_bridge::TimedJointTrajectoryToJointTrajectoryMsg(
       publish_solution.joint_trajectory, joint_trajectory_msg);
   joint_trajectory_msg.header.stamp = connectable_time;
+  
+  LogJointTrajectoryMsg(this->get_logger(), joint_trajectory_msg, "publish_solution_all_joints");
+  
   joint_trajectories_pub_->PublishJointTrajectory(joint_trajectory_msg, joint_state_msg);
+  //ここまで
 
   if (goal_constraints.enable_base) {
     const auto base_trajectory = tmc_robot_local_planner_utils::ExtractMultiDOFJointTrajectory(
@@ -329,8 +482,17 @@ void RobotLocalPlannerNodeBase::ConstraintCallback(const tmc_planning_msgs::msg:
   status_pub_->UpdateConstraintsStatus(constraints_.id, tmc_planning_msgs::msg::ConstraintsStatus::PREEMPTED);
   status_pub_->UpdateConstraintsStatus(msg->id, tmc_planning_msgs::msg::ConstraintsStatus::NOT_USED);
 
+  // tmc_planning_msgs::msg::RobotLocalGoal goal_msg = *msg;
+  // tmc_robot_local_planner_utils::TransformConstraints(kOriginFrame, kTFTimeout, tf_buffer_, goal_msg.constraints);
+//上記の部分を変更
   tmc_planning_msgs::msg::RobotLocalGoal goal_msg = *msg;
+
+  LogRobotLocalGoalMsg(this->get_logger(), goal_msg, "received");
+
   tmc_robot_local_planner_utils::TransformConstraints(kOriginFrame, kTFTimeout, tf_buffer_, goal_msg.constraints);
+
+  LogRobotLocalGoalMsg(this->get_logger(), goal_msg, "after_transform");
+  //
 
   RobotLocalGoal goal_impl(goal_msg);
   displacement_checker_->UpdateConstraints(goal_impl.constraints);
@@ -556,3 +718,7 @@ RobotLocalPlannerNodeBase::PlanResult RobotLocalPlannerNodeWithPlugin::PlanImpl(
 
 
 }  // namespace hsrb_robot_local_planner_node
+
+
+
+

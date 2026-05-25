@@ -51,18 +51,49 @@ def generate_launch_description():
     joint_weights = [10.0, 1.0, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0]
     base_weights = [3.0, 3.0, 1.0]
 
+    # robot_local_planner_node_params = {
+    #     'optimize_second': True,
+    #     'optimize_action': 'hsrb_quick_path_optimizer/OptimizerPluginMultiThread',
+    #     'omni_base_controller': {'joints': ['odom_x', 'odom_y', 'odom_t']},
+    #     'link_displacement_threshold': 0.01,
+    #     'use_current_state_for_displacement': True,
+    #     'publish_generated_trajectories': True,
+    #     'publish_planned_trajectory': True,
+    #     'middle_state_base_position_range': 1.0,
+    #     'middle_state_base_rotation_range': 1.5,
+    #     'ik_initial_range': 1.0,
+    # }
     robot_local_planner_node_params = {
-        'optimize_second': True,
-        'optimize_action': 'hsrb_quick_path_optimizer/OptimizerPluginMultiThread',
-        'omni_base_controller': {'joints': ['odom_x', 'odom_y', 'odom_t']},
-        'link_displacement_threshold': 0.01,
-        'use_current_state_for_displacement': True,
-        'publish_generated_trajectories': True,
-        'publish_planned_trajectory': True,
-        'middle_state_base_position_range': 1.0,
-        'middle_state_base_rotation_range': 1.5,
-        'ik_initial_range': 1.0,
-    }
+    'optimize_second': True,
+    'optimize_action': 'hsrb_quick_path_optimizer/OptimizerPluginMultiThread',
+
+    'head_trajectory_controller': {
+        'joints': ['head_pan_joint', 'head_tilt_joint'],
+    },
+    'arm_trajectory_controller': {
+        'joints': [
+            'arm_lift_joint',
+            'arm_flex_joint',
+            'arm_roll_joint',
+            'wrist_flex_joint',
+            'wrist_roll_joint',
+        ],
+    },
+    'gripper_controller': {
+        'joints': ['hand_motor_joint'],
+    },
+    'omni_base_controller': {
+        'joints': ['odom_x', 'odom_y', 'odom_t'],
+    },
+
+    'link_displacement_threshold': 0.01,
+    'use_current_state_for_displacement': True,
+    'publish_generated_trajectories': True,
+    'publish_planned_trajectory': True,
+    'middle_state_base_position_range': 1.0,
+    'middle_state_base_rotation_range': 1.5,
+    'ik_initial_range': 1.0,
+}
     generator_params = {
         'base_movement_type': 1,
         'max_trajectory_num': 50,

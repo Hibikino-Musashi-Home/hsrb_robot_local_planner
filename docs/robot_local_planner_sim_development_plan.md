@@ -60,9 +60,13 @@ make up localhost SCENE=rlp_empty
 # S3: 上記に正面の対象物を1個だけ追加
 make down
 make up localhost SCENE=rlp
+
+# S3.5: 物体・障害物を外し、HSR-Bの台車/関節モデルを確認
+make down
+make up localhost SCENE=rlp_empty
 ```
 
-RLPノードは別ターミナルで、Apptainerへ入ってからこのリポジトリのbuildを使い、`use_sim_time:=true` を付けて起動する。S0〜S2では `placement.rlp_empty.yaml`、S3では `placement.rlp.yaml` が使われる。
+RLPノードは別ターミナルで、Apptainerへ入ってからこのリポジトリのbuildを使い、`use_sim_time:=true` を付けて起動する。S0〜S2とS3.5では `placement.rlp_empty.yaml`、S3では `placement.rlp.yaml` が使われる。
 
 ```bash
 cd ~/carrobo26_ws
@@ -82,6 +86,7 @@ ros2 launch hsrb_robot_local_planner_node \
 | S1: 腕単体 | 関節目標と手先目標。`enable_base=false`。Generate→Evaluate→Validate→Optimizeの一巡 | S0と同じ。外周壁はテスト経路外で、RLPの障害物入力は空 | 固定した腕目標を複数回実行し、毎回SUCCESS。台車が動かず、手先残差が収束 |
 | S2: 自由空間whole-body | 台車のみ、腕のみ、台車＋腕の複合目標。速度・加速度制約の確認 | S0の広い平面。外周壁に近づかず、まだ障害物回避は評価しない | 台車の直進・横移動・旋回と複合動作が安定。周期内に恒常的なtimeoutがない |
 | S3: Simチューニング | 候補数、IK初期値、評価重み、到達判定、時間予算を一項目ずつ調整 | 正面に対象物を1個だけ配置。例: apple/canを `x=0.65〜0.70, y=0` | 目標姿勢への接近・退避を固定シナリオで反復できる。変更前後を同じ指標で比較できる |
+| S3.5: ハードウェアモデル整合 | `tread`、`caster_offset`、`wheel_radius`、台車/関節の速度・加速度上限を明示し、台車4ケース＋関節8ケースを確認 | S0〜S2と同じ空間。物体・家具・障害物なし。SimはHSR-Bモデル | RLPの実行時パラメータがプロファイルと一致し、計画軌道の制限内で全ケースがSUCCESS・収束。実機の校正値確定は含めない |
 | S4: 静的環境障害物 | `PlanningSceneWorld.collision_objects` の入力と回避経路。衝突検証の安全マージン確認 | 箱または円柱を1個。まず横に回避可能な配置 | Sim上の障害物とRLPへ送った形状が一致し、接触せず回避。障害物を完全に塞いだ場合は失敗を正しく返す |
 | S5: 把持物体 | `attached_collision_objects`、把持中の衝突除外ペア、attach/release | S4の障害物＋正面の対象物。把持後に退避・搬送 | 把持前、把持中、解放後で形状が正しく切り替わる。指との常時接触で全滅しない |
 | S6: 認識・動的環境 | PointCloud/検出結果からの形状化、更新周期、古い物体の削除 | 物体位置ずれ、複数障害物、最後に移動物体 | 座標変換、自己点群除去、形状数、更新遅延を含めて安定。静的シーンの回帰試験を壊さない |
@@ -155,6 +160,60 @@ retreat:  odom 基準        (0.60, 0.00, 0.40), roll=pi, velocity=0.35
 
 なお、制約状態が完了した後も `planner_status` が `CONSTRAINTS_EMPTY(-1)` に戻ることがあるため、試験ではSUCCESSを含む履歴と実際のcontroller/TF収束を併せて判定した。これは `SATISFIED` の瞬間だけを成功と数えないためである。
 
+### S3.5: ハードウェアモデル整合（HSR-B Sim）
+
+S3.5は、実機の最大性能を推定する段階ではない。`carrobo-isaac` がHSR-B固定であるため、まずRLPとSimが同じ幾何・制限値を参照していること、そしてその値でコントローラが安全に追従できることを空シーンで確認する。実機の個体差、タイヤ摩耗、床材、積載による実効値はS7で別途測定する。
+
+今回のSim用プロファイルは次のとおりとする。
+
+| 分類 | パラメータ | S3.5値 | 備考 |
+| --- | --- | ---: | --- |
+| 台車寸法 | `tread` | 0.266 m | HSR-B基準 |
+| 台車寸法 | `caster_offset` | 0.11 m | 操舵軸と車軸の距離 |
+| 台車寸法 | `wheel_radius` | 0.04 m | HSR-B基準 |
+| 台車上限 | `max_caster_velocity` / `max_wheel_velocity` | 1.8 / 8.5 rad/s | RLPの計画上限 |
+| 台車上限 | `max_caster_acceleration` / `max_wheel_acceleration` | 1.8 / 5.0 rad/s² | RLPの計画上限 |
+| 仮想台車関節 | `odom_x/y/t.velocity` | 0.2 / 0.2 / 0.5 | RLPの仮想関節上限 |
+| 仮想台車関節 | `odom_x/y/t.acceleration` | 0.1 / 0.1 / 0.5 | RLPの仮想関節上限 |
+
+腕・頭・ハンドの関節上限は、HSR-B標準値としてlaunchに明示した。S3.5では、各関節をGO姿勢近傍で小さく動かし、RLPが出した `JointTrajectory` の速度・加速度がプロファイル内に収まること、controller/TFの実状態が収束することを確認する。`joint_states` から得たSimの物理応答は別の診断値として記録する。現在のcarrobo-isaacは高剛性のposition-driveを使っており、RLPの加速度制限をアクチュエータ側で直接制限しないため、物理応答の加速度超過は警告として扱い、RLPの指令軌道制限違反とは分けて評価する。最大値そのものの同定は実機で行う。
+
+実行スクリプトは [`tools/s35_hardware_model_runner.py`](../tools/s35_hardware_model_runner.py) である。S3.5では対象物を使わない。
+
+```bash
+# Apptainer側（ユーザーの共通手順を完了したシェル）
+cd ~/carrobo26_ws
+bash 0_shell.sh
+. /entrypoint.sh
+source install/setup.bash
+. 5e_isaac_mode.sh
+python3 src/4_manipulation/hsrb_robot_local_planner/tools/s35_hardware_model_runner.py \
+  --trials 1 | tee /tmp/rlp_s35_hardware_model.jsonl
+```
+
+合格条件は、パラメータ監査が一致し、RLPの計画軌道に制限違反がなく、台車4ケース（x、y、yaw、複合）と関節8ケースがすべて planner SUCCESS・制約終端・物理状態収束になることとする。実測台車誤差は位置2 cm・yaw 0.05 rad以内、関節目標はrunnerの許容誤差内とする。Simの物理応答に加速度警告が出た場合は記録して原因を確認するが、stock position-drive由来であることを切り分けたうえで、RLPの計画軌道が制限内ならS3.5の合否とは分けて扱う。いずれかの合否条件が失敗した場合はS4へ進まず、モデル値・関節名/順序・controller stateを再確認する。
+
+#### S3.5実行記録（2026-09-08）
+
+`carrobo-isaac` を `SCENE=rlp_empty` で再起動し、Apptainer内で共通のROS環境を初期化した後、RLPを `use_sim_time:=true` で起動して検証した。実行コマンドは次のとおりである。
+
+```bash
+python3 src/4_manipulation/hsrb_robot_local_planner/tools/s35_hardware_model_runner.py \
+  --trials 1 --reset-settle-sec 2.0 --timeout-sec 15.0 \
+  | tee /tmp/rlp_s35_full_final2.jsonl
+```
+
+| 指標 | 結果 |
+| --- | ---: |
+| パラメータ監査 | PASS |
+| 台車ケース | 4/4 |
+| 関節ケース | 8/8 |
+| RLP計画軌道の制限違反 | 0 |
+| Sim物理応答の制限警告 | 7/8（診断警告） |
+| 試行全体 | 1/1 PASS |
+
+最終試行の最大誤差は、台車位置 `0.01891 m`、台車yaw `0.04851 rad`、関節 `0.01107` で、S3.5の判定閾値内だった。物理応答の加速度警告はSimのposition-drive特性によるものであり、実機の加速度上限を確認した結果ではない。実機へ移る前に、実機ログ・ドライバ側制限・追従誤差を用いて同じ監査をやり直す。
+
 ### S4: 静的障害物
 
 Isaac Simの見た目・物理衝突と、RLPの衝突判定用形状を同じ寸法・同じ `odom` 姿勢で管理する。RLP側へは点群やOctomapを直接送らず、少数のBox/Cylinderプリミティブへ変換して送る。
@@ -179,6 +238,7 @@ Isaac Simの見た目・物理衝突と、RLPの衝突判定用形状を同じ�
 
 - Sim用のRLP launch/パラメータ設定
 - S1〜S3の固定コマンド・回帰テストスクリプト（S3: `tools/s3_tuning_runner.py`）
+- S3.5のハードウェアモデル監査・基準動作スクリプト（`tools/s35_hardware_model_runner.py`）
 - `planner_status` / `displacements` / 実行時間の記録
 - S4の `PlanningSceneWorld` publisherまたはbridge
 - S5のAttached Object publisherと衝突除外ペアの管理
@@ -189,6 +249,7 @@ Isaac Simの見た目・物理衝突と、RLPの衝突判定用形状を同じ�
 - `configs/placement.rlp_empty.yaml`: S0〜S2用の空配置設定
 - `configs/placement.rlp.yaml`: 正面対象物だけを置く配置設定
 - RLP用world/configの切替機構
+- S3.5用のHSR-B台車寸法・速度上限の環境変数（`BASE_WHEEL_SEPARATION`、`BASE_CASTER_OFFSET` など）
 - 後段で使う静的障害物シナリオ
 
 競技用 `worlds/carrobo.world` と `configs/placement*.yaml` は、RLP検証用の変更で上書きしない。
@@ -216,6 +277,8 @@ S1を「動いた」と判定する条件は以下とする。
 - S2: neutral → 台車x移動 → y移動 → yaw旋回 → 台車＋腕＋頭の複合目標を実行し、全ケースでRLPの成功、controllerの実到達、台車の目標外移動がないことを確認。
 
 ここでのS1/S2はスモーク検証であり、同じ初期状態から10回以上連続で行う回帰試験は、S3のチューニング前に追加する。
+
+S3.5は「HSR-B Simモデルでの整合確認」までを完了条件とし、実機用の値を確定したことを意味しない。実機へ移る前に、同じ項目を実機ログ・実測値で再取得し、S3.5のプロファイルを更新してからS7へ進む。
 
 ## 参照
 

@@ -68,6 +68,11 @@ def generate_launch_description():
         },
         'omni_base_controller': {'joints': ['odom_x', 'odom_y', 'odom_t']},
         'link_displacement_threshold': 0.01,
+        # S3.5: match the HSR-B Sim controller's measured settling residual
+        # (about 2 cm/rad under gravity) while remaining well below the
+        # original 0.1 m/rad default.  The runner separately checks the
+        # physical joint error with a tighter 0.02 tolerance.
+        'joint_displacement_threshold': 0.03,
         'use_current_state_for_displacement': True,
         'publish_generated_trajectories': True,
         'publish_planned_trajectory': True,
@@ -105,21 +110,42 @@ def generate_launch_description():
         'sampling_interval_sec': 0.1,
         'is_force_succeeded': False,
         'optimize_timeout': 0.05,
-        'head_pan_joint': {'velocity': 2.0, 'acceleration': 1.0},
-        'head_tilt_joint': {'velocity': 2.0, 'acceleration': 1.0},
-        'arm_lift_joint': {'velocity': 0.15, 'acceleration': 0.15},
-        'arm_flex_joint': {'velocity': 1.58, 'acceleration': 1.0},
-        'arm_roll_joint': {'velocity': 2.0, 'acceleration': 1.0},
-        'wrist_flex_joint': {'velocity': 2.0, 'acceleration': 1.0},
-        'wrist_roll_joint': {'velocity': 2.0, 'acceleration': 1.0},
-        'hand_motor_joint': {'velocity': 1.0, 'acceleration': 1.0},
-        'odom_x': {'velocity': 0.2, 'acceleration': 0.1},
-        'odom_y': {'velocity': 0.2, 'acceleration': 0.1},
-        'odom_t': {'velocity': 0.5, 'acceleration': 0.5},
-        'max_caster_velocity': 2.5,
-        'max_caster_acceleration': 5.0,
-        'max_wheel_velocity': 20.8,
-        'max_wheel_acceleration': 41.7,
+        # S3.5 HSR-B Sim hardware profile.  Keep these values explicit instead
+        # of relying on hsrb_quick_path_optimizer's HSR-B defaults so a real
+        # robot profile can be reviewed as one table before deployment.
+        'tread': 0.266,
+        'caster_offset': 0.11,
+        'wheel_radius': 0.04,
+        # Use flat ROS parameter names.  rclcpp/tmc_utils reads these as
+        # "<joint>.velocity" and "<joint>.acceleration"; nested mappings are
+        # silently omitted by the component container's parameter override
+        # conversion.
+        'head_pan_joint.velocity': 1.0,
+        'head_pan_joint.acceleration': 1.0,
+        'head_tilt_joint.velocity': 1.0,
+        'head_tilt_joint.acceleration': 1.0,
+        'arm_lift_joint.velocity': 0.15,
+        'arm_lift_joint.acceleration': 0.15,
+        'arm_flex_joint.velocity': 1.0,
+        'arm_flex_joint.acceleration': 1.0,
+        'arm_roll_joint.velocity': 1.0,
+        'arm_roll_joint.acceleration': 1.0,
+        'wrist_flex_joint.velocity': 1.0,
+        'wrist_flex_joint.acceleration': 1.0,
+        'wrist_roll_joint.velocity': 1.0,
+        'wrist_roll_joint.acceleration': 1.0,
+        'hand_motor_joint.velocity': 3.0,
+        'hand_motor_joint.acceleration': 20.0,
+        'odom_x.velocity': 0.2,
+        'odom_x.acceleration': 0.1,
+        'odom_y.velocity': 0.2,
+        'odom_y.acceleration': 0.1,
+        'odom_t.velocity': 0.5,
+        'odom_t.acceleration': 0.5,
+        'max_caster_velocity': 1.8,
+        'max_caster_acceleration': 1.8,
+        'max_wheel_velocity': 8.5,
+        'max_wheel_acceleration': 5.0,
     }
     evaluator_params = {
         'score_calculations': {

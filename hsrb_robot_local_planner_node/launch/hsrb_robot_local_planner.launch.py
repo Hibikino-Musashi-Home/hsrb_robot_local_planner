@@ -73,11 +73,15 @@ def generate_launch_description():
         'publish_planned_trajectory': True,
         'middle_state_base_position_range': 1.0,
         'middle_state_base_rotation_range': 1.5,
-        'ik_initial_range': 1.0,
+        # S3 Sim tuning (2026-09): keep the IK search near the current posture.
+        # Re-evaluate this value when S4 introduces obstacle-driven branches.
+        'ik_initial_range': 0.5,
     }
     generator_params = {
         'base_movement_type': 1,
-        'max_trajectory_num': 50,
+        # S3 Sim tuning (2026-09): 10 is enough for the fixed object approach
+        # while keeping the reactive loop lighter than the original 50.
+        'max_trajectory_num': 10,
         'max_simple_trajectory_num': 5,
         'generation_thread_num': 4,
         'solver_type': 'hsrb_analytic_ik/HsrbIKSolver',

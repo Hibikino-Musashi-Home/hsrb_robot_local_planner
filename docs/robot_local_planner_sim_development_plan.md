@@ -129,6 +129,32 @@ S0〜S2の実行時は、`/omni_base_controller/state` の関節順を `odom_x, 
 
 対象物の見た目には既存のYCBモデルを使える。実際の把持処理や吸着は、この段階の合格条件に含めない。
 
+#### S3チューニング記録（2026-09-08）
+
+`make up localhost SCENE=rlp` で apple を `odom=(0.70, 0.00)` に置き、RLPの環境障害物入力は空のまま、次の固定シナリオを各試行の前にSimリセットして実行した。
+
+```text
+above:    base_footprint 基準 (0.60, 0.00, 0.40), roll=pi, velocity=0.35
+approach: odom 基準        (0.60, 0.00, 0.18), roll=pi, velocity=0.20
+retreat:  odom 基準        (0.60, 0.00, 0.40), roll=pi, velocity=0.35
+```
+
+`tools/s3_tuning_runner.py` は、`planner_status`、制約状態、生成候補数、計画待ち時間、`odom -> hand_palm_link` の実測残差を記録する。各ステップの合格条件は、SUCCESSを含むこと、制約が `SATISFIED`/`PREEMPTED` になること、手先位置誤差5 cm以内・姿勢誤差0.2 rad以内で0.5秒安定することとした。
+
+| 比較 | 試行 | 成功 | 平均候補数 | 平均status待ち | 最大位置誤差 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `max_trajectory_num=5` | 5 | 5/5 | 8.4 | 4.25 s | 1.45 cm |
+| `max_trajectory_num=10` | 5 | 5/5 | 13.7 | 3.77 s | 1.55 cm |
+| `ik_initial_range=0.5`（max=10） | 5 | 5/5 | 13.6 | 3.98 s | 1.53 cm |
+| `ik_initial_range=1.5`（max=10） | 5 | 5/5 | 13.7 | 5.20 s | 1.65 cm |
+| `generator_timeout=0.01`（max=10, IK=0.5） | 5 | 5/5 | 13.9 | 4.10 s | 1.62 cm |
+| `generator_timeout=0.05`（max=10, IK=0.5） | 5 | 5/5 | 13.5 | 4.03 s | 1.59 cm |
+| 採用設定（max=10, IK=0.5, generator=0.03） | 10 | 10/10 | 13.4 | 4.16 s | 1.61 cm |
+
+以上から、S3のSim用RLP設定として `max_trajectory_num=10` と `ik_initial_range=0.5` を採用し、`generator_timeout=0.03`、`max_simple_trajectory_num=5`、`generation_thread_num=4`、`validate_timeout=0.15`、`validation_thread_num=8`、`optimize_timeout=0.05` は維持する。候補数10は障害物なしのS3での値であり、S4の回避経路を追加した時点で、候補不足による失敗がないか再評価する。
+
+なお、制約状態が完了した後も `planner_status` が `CONSTRAINTS_EMPTY(-1)` に戻ることがあるため、試験ではSUCCESSを含む履歴と実際のcontroller/TF収束を併せて判定した。これは `SATISFIED` の瞬間だけを成功と数えないためである。
+
 ### S4: 静的障害物
 
 Isaac Simの見た目・物理衝突と、RLPの衝突判定用形状を同じ寸法・同じ `odom` 姿勢で管理する。RLP側へは点群やOctomapを直接送らず、少数のBox/Cylinderプリミティブへ変換して送る。
@@ -152,7 +178,7 @@ Isaac Simの見た目・物理衝突と、RLPの衝突判定用形状を同じ�
 ### このリポジトリ
 
 - Sim用のRLP launch/パラメータ設定
-- S1〜S3の固定コマンド・回帰テストスクリプト
+- S1〜S3の固定コマンド・回帰テストスクリプト（S3: `tools/s3_tuning_runner.py`）
 - `planner_status` / `displacements` / 実行時間の記録
 - S4の `PlanningSceneWorld` publisherまたはbridge
 - S5のAttached Object publisherと衝突除外ペアの管理

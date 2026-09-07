@@ -54,6 +54,18 @@ def generate_launch_description():
     robot_local_planner_node_params = {
         'optimize_second': True,
         'optimize_action': 'hsrb_quick_path_optimizer/OptimizerPluginMultiThread',
+        'head_trajectory_controller': {
+            'joints': ['head_pan_joint', 'head_tilt_joint'],
+        },
+        'arm_trajectory_controller': {
+            'joints': [
+                'arm_lift_joint', 'arm_flex_joint', 'arm_roll_joint',
+                'wrist_flex_joint', 'wrist_roll_joint',
+            ],
+        },
+        'gripper_controller': {
+            'joints': ['hand_motor_joint'],
+        },
         'omni_base_controller': {'joints': ['odom_x', 'odom_y', 'odom_t']},
         'link_displacement_threshold': 0.01,
         'use_current_state_for_displacement': True,
@@ -112,8 +124,7 @@ def generate_launch_description():
                 'type': 'tmc_local_path_evaluator/TimeBaseScoreCalculation',
             },
             'soft_path_joint': {
-                'type': 'tmc_local_path_evaluator/SoftPathJointConstraintScoreCalculation',
-                'distance_threshold': 0.1,
+                'type': 'tmc_local_path_evaluator/SoftJointConstraintScoreCalculation',
             },
         },
     }

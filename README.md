@@ -18,6 +18,9 @@ https://github.com/user-attachments/assets/6d74dce5-e679-49f1-855e-3191f10acc53
 - `hsrb_robot_local_planner_node`: Gazeboシミュレータ等の HSR-B と連携し、ローカルパス計画および軌道生成を行うROS 2ノード。
 - `hsrb_rlp_interface_py`: Pythonからローカルプランナーにゴールを指示するためのインターフェースと、インタラクティブに操作できるシェル (`irlp`) を提供するパッケージ。
 
+Isaac Sim (`carrobo-isaac`) を使った段階的な検証環境と、実機移行までの開発順序は
+[RLP開発ロードマップ](docs/robot_local_planner_sim_development_plan.md) にまとめています。
+
 ## セットアップ
 ```bash
 # まだCloneしていない場合，以下のコマンドでClone

@@ -135,8 +135,7 @@ def generate_launch_description():
         'score_calculations': {
             'names': ['time_base', 'soft_path_joint'],
             'time_base': {'type': 'tmc_local_path_evaluator/TimeBaseScoreCalculation'},
-            'soft_path_joint': {'type': 'tmc_local_path_evaluator/SoftPathJointConstraintScoreCalculation',
-                                'distance_threshold': 0.1},
+            'soft_path_joint': {'type': 'tmc_local_path_evaluator/SoftJointConstraintScoreCalculation'},
         },
     }
     validator_params = {

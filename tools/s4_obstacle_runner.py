@@ -9,11 +9,13 @@ boxes through its ``collision_object`` input topic instead of publishing to
 the transformed output directly.  This runner is a small, deterministic
 scene bridge for that contract and a base-motion test driver around it.
 
-The boxes are expressed in the planner's ``odom`` frame.  The same dimensions
-and poses must be used by the Isaac Sim scene when the physical counterpart is
-added.  The current runner deliberately keeps the scene geometry in one place
-so that a mismatch between the RLP collision scene and the Sim scene is easy to
-spot in the JSONL output.
+The boxes are expressed in the planner's ``odom`` frame.  The runner registers
+them with the RLP and publishes the same snapshot to the Isaac Sim physical
+obstacle bridge.  The physical bridge receives each box relative to the robot
+pose at the start of the case, so the RLP and Sim coordinate conventions stay
+aligned.  The current runner deliberately keeps the scene geometry in one
+place so that a mismatch between the RLP collision scene and the Sim scene is
+easy to spot in the JSONL output.
 
 Run this from the Apptainer shell after sourcing the workspace and starting
 Isaac Sim with ``SCENE=rlp_empty``.  The RLP node itself is expected to be
@@ -38,6 +40,7 @@ from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from shape_msgs.msg import SolidPrimitive
 from std_srvs.srv import Empty
+from std_msgs.msg import Bool, String, UInt32
 
 from hsrb_rlp_interface_py.robot_local_planner import RobotLocalPlanner
 from tmc_planning_msgs.msg import ConstraintsStatus, RobotLocalPlannerStatus
@@ -45,6 +48,9 @@ from tmc_planning_msgs.msg import ConstraintsStatus, RobotLocalPlannerStatus
 
 ENVIRONMENT_TOPIC = "collision_environment_server/transformed_environment"
 ENVIRONMENT_CONTROL_TOPIC = "collision_environment_server/collision_object"
+PHYSICAL_OBSTACLE_TOPIC = "/rlp_validation/physical_obstacles"
+PHYSICAL_OBSTACLE_ACK_TOPIC = "/rlp_validation/physical_obstacles_applied"
+PHYSICAL_OBSTACLE_CONTACT_TOPIC = "/rlp_validation/physical_obstacle_contact"
 BASE_FRAME = "base_footprint"
 ODOM_FRAME = "odom"
 DONE_STATUSES = {ConstraintsStatus.SATISFIED, ConstraintsStatus.PREEMPTED}
@@ -187,7 +193,7 @@ class Capture:
 
 
 class EnvironmentPublisher:
-    """Maintain the runner's objects through collision_environment_server."""
+    """Maintain matching RLP and Isaac Sim obstacle snapshots."""
 
     def __init__(self, node: RobotLocalPlanner) -> None:
         self._publisher = node.create_publisher(
@@ -195,15 +201,75 @@ class EnvironmentPublisher:
             ENVIRONMENT_CONTROL_TOPIC,
             10,
         )
+        self._physical_publisher = node.create_publisher(
+            String,
+            PHYSICAL_OBSTACLE_TOPIC,
+            10,
+        )
+        self._physical_lock = threading.Lock()
+        self._physical_sequence = 0
+        self._physical_acknowledged = 0
+        self._physical_contact = False
+        node.create_subscription(
+            UInt32,
+            PHYSICAL_OBSTACLE_ACK_TOPIC,
+            self._physical_ack_callback,
+            10,
+        )
+        node.create_subscription(
+            Bool,
+            PHYSICAL_OBSTACLE_CONTACT_TOPIC,
+            self._physical_contact_callback,
+            10,
+        )
         self._known_ids: set[str] = set()
 
     def wait_for_subscriber(self, timeout_sec: float = 10.0) -> bool:
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
-            if self._publisher.get_subscription_count() > 0:
+            if (
+                self._publisher.get_subscription_count() > 0
+                and self._physical_publisher.get_subscription_count() > 0
+            ):
                 return True
             time.sleep(0.1)
         return False
+
+    def _physical_ack_callback(self, msg: UInt32) -> None:
+        with self._physical_lock:
+            self._physical_acknowledged = max(
+                self._physical_acknowledged,
+                int(msg.data),
+            )
+
+    def _physical_contact_callback(self, msg: Bool) -> None:
+        if msg.data:
+            with self._physical_lock:
+                self._physical_contact = True
+
+    def physical_contact_seen(self) -> bool:
+        with self._physical_lock:
+            return self._physical_contact
+
+    @staticmethod
+    def _to_local_box(
+        box: Box,
+        reference_pose: tuple[float, float, float],
+    ) -> dict[str, Any]:
+        reference_x, reference_y, reference_yaw = reference_pose
+        dx = box.center[0] - reference_x
+        dy = box.center[1] - reference_y
+        cos_yaw = math.cos(reference_yaw)
+        sin_yaw = math.sin(reference_yaw)
+        return {
+            "id": box.name,
+            "center_local": [
+                cos_yaw * dx + sin_yaw * dy,
+                -sin_yaw * dx + cos_yaw * dy,
+            ],
+            "dimensions_xyz": list(box.dimensions),
+            "yaw_local": box.yaw - reference_yaw,
+        }
 
     @staticmethod
     def _to_collision_object(box: Box) -> CollisionObject:
@@ -231,10 +297,14 @@ class EnvironmentPublisher:
     def publish_boxes(
         self,
         boxes: Iterable[Box],
+        reference_pose: tuple[float, float, float] | None = None,
         repeat: int = 8,
         period_sec: float = 0.1,
-    ) -> None:
+        ack_timeout_sec: float = 10.0,
+    ) -> bool:
         boxes = tuple(boxes)
+        if boxes and reference_pose is None:
+            raise ValueError("reference_pose is required for physical obstacles")
         next_ids = {box.name for box in boxes}
         stale_ids = self._known_ids - next_ids
 
@@ -251,12 +321,39 @@ class EnvironmentPublisher:
             message.operation = CollisionObject.ADD
             messages.append(message)
 
+        with self._physical_lock:
+            self._physical_sequence += 1
+            sequence = self._physical_sequence
+            self._physical_contact = False
+        physical_payload = {
+            "sequence": sequence,
+            "obstacles": [
+                self._to_local_box(box, reference_pose)
+                for box in boxes
+            ] if boxes else [],
+        }
+        physical_message = String()
+        physical_message.data = json.dumps(
+            physical_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
         for _ in range(max(1, repeat)):
             for message in messages:
                 self._publisher.publish(message)
+            self._physical_publisher.publish(physical_message)
             time.sleep(period_sec)
 
         self._known_ids = next_ids
+        deadline = time.monotonic() + ack_timeout_sec
+        while time.monotonic() < deadline:
+            with self._physical_lock:
+                if self._physical_acknowledged >= sequence:
+                    return True
+            time.sleep(0.05)
+        return False
 
 
 def _reset_world(node: RobotLocalPlanner, settle_sec: float) -> bool:
@@ -529,6 +626,10 @@ def _scenario_pass(
     planner_success = RobotLocalPlannerStatus.SUCCESS in planner_statuses
     constraint_done = constraint_status in DONE_STATUSES
     if scenario.expect_success:
+        if not physical.get("physical_environment_applied", False):
+            return False, "physical_obstacle_snapshot_not_applied"
+        if physical.get("physical_obstacle_contact", False):
+            return False, "physical_obstacle_contact_detected"
         if not planner_success:
             return False, "expected_success_but_no_planner_success"
         if not constraint_done:
@@ -566,20 +667,21 @@ def _run_scenario(
     timeout_sec: float,
 ) -> dict[str, Any]:
     reset_ok = _reset_world(node, reset_settle_sec)
-    environment.publish_boxes(())
+    clear_ok = environment.publish_boxes(())
 
     node.has_wait_complete = True
     go_start = time.monotonic()
     go_ok = bool(node.move_to_go())
     go_wall_sec = time.monotonic() - go_start
     node.has_wait_complete = False
-    if not reset_ok or not go_ok:
+    if not reset_ok or not go_ok or not clear_ok:
         environment.publish_boxes(())
         return {
             "scenario": scenario.name,
             "description": scenario.description,
             "reset_ok": reset_ok,
             "go_ok": go_ok,
+            "physical_environment_applied": clear_ok,
             "pass": False,
             "reason": "preparation_failed",
         }
@@ -597,7 +699,22 @@ def _run_scenario(
         }
 
     resolved_scenario = _resolve_scenario(scenario, start_pose)
-    environment.publish_boxes(resolved_scenario.obstacles)
+    physical_apply_ok = environment.publish_boxes(
+        resolved_scenario.obstacles,
+        reference_pose=start_pose,
+    )
+    if not physical_apply_ok:
+        environment.publish_boxes(())
+        return {
+            "scenario": scenario.name,
+            "description": scenario.description,
+            "start_pose_odom": list(start_pose),
+            "reset_ok": reset_ok,
+            "go_ok": go_ok,
+            "physical_environment_applied": False,
+            "pass": False,
+            "reason": "physical_obstacle_snapshot_not_applied",
+        }
     capture.clear()
     target_x, target_y, target_yaw = resolved_scenario.target
     start = time.monotonic()
@@ -615,6 +732,8 @@ def _run_scenario(
     physical = {
         "physical_converged": False,
         "physical_wait_wall_sec": 0.0,
+        "physical_environment_applied": physical_apply_ok,
+        "physical_obstacle_contact": environment.physical_contact_seen(),
     }
     if RobotLocalPlannerStatus.SUCCESS in planner_statuses and constraint_status in DONE_STATUSES:
         physical = _wait_for_base_pose(
@@ -622,6 +741,8 @@ def _run_scenario(
             resolved_scenario.target,
             max(1.0, timeout_sec - status_wait),
         )
+        physical["physical_environment_applied"] = physical_apply_ok
+        physical["physical_obstacle_contact"] = environment.physical_contact_seen()
     path = _path_diagnostics(
         resolved_scenario,
         capture.planned_copy(),
@@ -706,6 +827,9 @@ def main() -> int:
         "event": "start",
         "stage": "S4",
         "environment_topic": ENVIRONMENT_TOPIC,
+        "environment_control_topic": ENVIRONMENT_CONTROL_TOPIC,
+        "physical_obstacle_topic": PHYSICAL_OBSTACLE_TOPIC,
+        "physical_obstacle_ack_topic": PHYSICAL_OBSTACLE_ACK_TOPIC,
         "scenario": args.scenario,
         "trials": args.trials,
     }, ensure_ascii=False))
@@ -718,7 +842,8 @@ def main() -> int:
                 "event": "error",
                 "stage": "S4",
                 "reason": "no_environment_subscriber",
-                "topic": ENVIRONMENT_TOPIC,
+                "environment_control_topic": ENVIRONMENT_CONTROL_TOPIC,
+                "physical_obstacle_topic": PHYSICAL_OBSTACLE_TOPIC,
             }, ensure_ascii=False))
             return 2
 

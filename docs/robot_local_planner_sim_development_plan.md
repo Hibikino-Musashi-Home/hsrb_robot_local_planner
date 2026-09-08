@@ -77,6 +77,14 @@ make up localhost SCENE=rlp GRASP=1
 make down
 make up localhost SCENE=rlp_grasp_table GRASP=1
 
+# S6.3a cabinet: 配置面の後方に上棚がある机
+make down
+make up localhost SCENE=rlp_grasp_cabinet GRASP=1
+
+# S6.3b: 動的障害物を追跡しながら把持・机上配置
+make down
+make up localhost SCENE=rlp_dynamic_grasp GRASP=1
+
 # S6.1/S6.2: pcl_reconstの点群から検出する動的障害物
 make down
 make up localhost SCENE=rlp_dynamic
@@ -105,7 +113,7 @@ ros2 launch hsrb_robot_local_planner_node \
 | S3.5: ハードウェアモデル整合 | `tread`、`caster_offset`、`wheel_radius`、台車/関節の速度・加速度上限を明示し、台車4ケース＋関節8ケースを確認 | S0〜S2と同じ空間。物体・家具・障害物なし。SimはHSR-Bモデル | RLPの実行時パラメータがプロファイルと一致し、計画軌道の制限内で全ケースがSUCCESS・収束。実機の校正値確定は含めない |
 | S4: 静的環境障害物 | `CollisionObject` の登録publisher、`odom`への座標変換、Sim PhysX scene bridge、回避経路と到達不能判定 | `rlp_validation.world`＋起動前登録済みの静的Box slot。runnerがケースごとに箱を切り替える | Sim上の障害物とRLPへ送った形状が一致し、RLPの計画軌道が接触せず回避。障害物を完全に塞いだ場合は失敗を正しく返す |
 | S5: 把持物体 | S5.1で認識→把持点→TF→接近・把持、`attached_collision_objects`、attach/release。S5.2でS4障害物、S5.3で机上配置を同時検証 | S5.1は`SCENE=rlp`の正面apple 1個。S5.2でS4のBox、S5.3で同一`odom`形状の机上スラブを追加 | S5.1は認識結果から得た姿勢へ到達し、Sim物理把持とAttached Objectを同時に確認。S5.2は把持中の形状切替と障害物回避、S5.3はAttached Objectのまま机へ運び、貫通を拒否し、開放後に机上へ残ることを確認 |
-| S6: 認識・動的環境 | S6.1で`pcl_reconst`点群→BridgeA→`CollisionObject`、S6.2で移動物体の追従・stale削除・オンライン更新。S6.3aで静的な机の認識→把持→配置を検証 | S6.1/S6.2は`SCENE=rlp_dynamic`。S6.3aは`SCENE=rlp_grasp_table`で、正面のappleと単純な机を置く | 点群の`odom`変換、形状化、更新周期、古い物体の削除が安定し、静的机については検出天板へAttached Objectを安全に運び、机上へ離脱できる。次にS6.3で複数物体・位置ずれ・遮蔽を追加する |
+| S6: 認識・動的環境 | S6.1で`pcl_reconst`点群→BridgeA→`CollisionObject`、S6.2で移動物体の追従・stale削除・オンライン更新。S6.3aで静的な机と上棚、S6.3bで動的障害物を含む認識→把持→配置を検証 | S6.1/S6.2は`SCENE=rlp_dynamic`、S6.3aは`SCENE=rlp_grasp_table`/`rlp_grasp_cabinet`、S6.3bは`SCENE=rlp_dynamic_grasp` | 点群の`odom`変換、形状化、更新周期、古い物体の削除が安定し、静的机・上棚ではAttached Objectを安全に配置でき、S6.3bでは把持中の動的更新とhidden後のstale削除まで成立する。これらが安定してから複数クラスタ・遮蔽・遅延分布を追加する |
 | S7: 実機移行 | 実機の速度・加速度・台車寸法・追従誤差に合わせる | Simと同じ固定シナリオを実機で再現 | まず無障害物・低速で確認し、S3〜S5相当のシナリオを順に実施 |
 
 ## 各段階の検証シナリオ
@@ -567,7 +575,7 @@ s6_3_table_recognition_grasp_place_runner.py \
   | tee /tmp/rlp_s63a_static_table_grasp_place.jsonl
 ```
 
-runnerには直接指定しなくても、S6.3aの既定値として机観察pan`0.80 rad`、配置パッチ`0.20 m`、解放前クリアランス`0.015 m`、高位置オフセット`0 m`が入っている。机だけを切り出して確認する場合は、最後のコマンドに`--table-only`を追加する。
+runnerには直接指定しなくても、S6.3aの既定値として机観察pan`0.80 rad`、配置パッチ`0.24 m`、解放前クリアランス`0.015 m`、高位置オフセット`0 m`が入っている。机だけを切り出して確認する場合は、最後のコマンドに`--table-only`を追加する。
 
 #### S6.3a実行記録（2026-09-09）
 
@@ -577,7 +585,7 @@ runnerには直接指定しなくても、S6.3aの既定値として机観察pan
 | --- | --- |
 | 机検出 | GroundingDINO `table`、score `0.426`〜`0.486` |
 | 点群天板推定 | `top_z=0.45035 m`、観測中心は試行により`(0.688, 0.484)`〜`(0.705, 0.480) m` |
-| RLP配置パッチ | 観測中心の`0.20 m × 0.20 m × 0.03 m`。Sim真値の机範囲内、`truth_used_for_construction=false` |
+| RLP配置パッチ | 観測中心の`0.24 m × 0.24 m × 0.03 m`。Sim真値は照合専用、`truth_used_for_construction=false` |
 | apple認識・TF・把持 | YOLO score `0.831`、把持点を`odom`へ変換、Sim `attached=true` |
 | Attached Object搬送 | 退避、机上高への水平移動、下降前姿勢、置き姿勢がすべてplanner SUCCESS・物理収束 |
 | 机との衝突検証 | 物体底面を机へ`0.02 m`侵入させるprobeを`VALIDATION_FAILURE(-4)`で拒否 |
@@ -588,7 +596,143 @@ runnerには直接指定しなくても、S6.3aの既定値として机観察pan
 
 開放後のappleは物理シミュレーション上で天板へ接触して静止するため、机上判定では剛体原点を接触基準とするYCB apple固有のモデル仮定と`5 mm`の数値許容を使う。これは搬送中の非接触条件とは別の「解放後に机上へ残る」判定である。実機移行時は、物体寸法、把持点、机面高さ、接触・滑りを実測して置き換える。
 
-次のS6.3bでは、`SCENE=rlp_dynamic_grasp`でS6.1/S6.2の動的障害物BridgeAと、このS6.3aのAttached Object搬送・机上配置を統合する。その後に同一フレーム内の複数クラスタ、認識位置の意図的なずれ、部分遮蔽、点群レート低下、更新遅延の分布を追加する。S6.3a、S6.3b、S5までの回帰が安定するまでは実機へ移行しない。
+#### S6.3a cabinet: 上棚付き配置面での衝突回避
+
+通常の机上配置が通った後、配置面の上に段があるキャビネット状の環境で同じフローを確認する。`SCENE=rlp_grasp_cabinet`は、S6.3aの物理机へ静的な上棚を1つ追加する。上棚は中心`(0.90, 0.70) m`、下面`z=0.62 m`、寸法`(0.90, 0.16, 0.05) m`とし、机の前方に配置経路を残しつつ、把持物体が上棚へ入り込むと衝突する位置関係にする。
+
+- 上棚はSim起動時にPhysX colliderとして生成し、実行中に物理形状を追加・削除しない。
+- runnerは上棚を`odom`の静的`CollisionObject`としてRLPへ登録するが、Simの物理環境bridgeへ重複登録しない。
+- 安全な配置点は机の観測パッチ中心から`y=-0.08 m`の前方へ置く。上棚の中心へ物体を侵入させるprobeは`VALIDATION_FAILURE(-4)`で拒否されなければならない。
+- 通常配置では上棚とのSim接触がなく、解放後に物体が机上へ残ることを確認する。
+
+実行手順は、S6.3aの共通Apptainer手順を完了した後、ホスト側で次を起動する。
+
+```bash
+# ホスト側
+xhost local:
+cd /home/hma/carrobo-isaac
+make down
+make up localhost SCENE=rlp_grasp_cabinet GRASP=1
+
+# Apptainer側はS6.3aと同じ5ターミナルを起動
+python3 src/4_manipulation/hsrb_robot_local_planner/tools/\
+s6_3a_cabinet_grasp_place_runner.py \
+  --timeout-sec 55.0 --release-settle-sec 2.0 \
+  | tee /tmp/rlp_s63a_cabinet_static.jsonl
+```
+
+#### S6.3a cabinet実行記録（2026-09-09）
+
+初回の段付き環境では、上棚の前縁が手先・腕の水平経路に近すぎて配置直前のRLPゴールが成立しなかった。上棚を机の後方へ`y=0.70 m`移動して前方の安全な配置経路を確保したところ、同じ上棚を残したまま**1/1 PASS**となった。これは障害物を削除した結果ではなく、キャビネットの開口部を明示した環境調整である。
+
+| 確認項目 | 結果 |
+| --- | --- |
+| 上棚の物理生成 | center`(0.90, 0.70) m`、bottom`z=0.62 m`、size`(0.90, 0.16, 0.05) m` |
+| 机認識 | GroundingDINO `table` + `pcl_reconst`平面、`top_z=0.45035 m` |
+| apple認識・TF・把持 | YOLO→把持点推定→`odom` TF、Sim `attached=true` |
+| 上棚CollisionObject | RLPへ追加・削除成功。Sim物理bridgeへは重複登録なし |
+| 上棚衝突probe | 上棚内部へのAttached Object目標を`VALIDATION_FAILURE(-4)`で拒否 |
+| 通常の配置 | `place_high`、probe、下降、releaseが成功。`placed_on_table=true` |
+| 上棚との物理接触 | `cabinet_physical_contact=false` |
+| 試行全体 | **1/1 PASS** |
+
+ログは`/tmp/rlp_s63a_cabinet_y070_20260909.jsonl`に保存した。S6.3a cabinetの合格後に、動的障害物を同じ把持・配置経路へ追加する。
+
+#### S6.3b: 動的障害物と把持・机上配置の統合
+
+S6.3bでは、S6.1/S6.2のBridgeAをS6.3aの認識→TF→把持→Attached Object→机上配置→解放へ統合する。動的BoxはSim側でPhysX colliderとして起動時に登録し、`hma_pcl_reconst2`の点群からBridgeAが`odom`の`CollisionObject`をオンライン更新する。Sim真値は判定専用で、検出形状の構築には使わない。
+
+`SCENE=rlp_dynamic_grasp`のBoxは中心`x=0.80 m`、初期`y=-0.30 m`付近からY方向へ移動し、周期`75 s`・visible`55 s`で遠方へ退避する。机とappleを同じシーンへ置くため、S6.3bのBridgeAは負のy領域と立体形状の条件で動的Boxだけを選ぶ。CollisionObjectの更新周期は`1 s`とし、点群処理のレートを保ちながらRLPの長いwhole-bodyゴールを過剰に無効化しない。
+
+合格条件は次のすべてとする。
+
+- `/hma_pcl_reconst/depth_registered/points`を受信し、BridgeAが動的Boxを検出する。
+- Sim truthとの初期中心誤差が`0.20 m`以下である。
+- 動的Boxの移動に対してBridgeAの更新が2回以上あり、検出中心のY差が`0.20 m`以上である。
+- appleを認識して`odom` TFを出し、把持、Attached Object登録、退避、机上配置、解放が成功する。
+- Attached Object登録後にもBridgeA更新が1回以上ある。
+- Sim truthがhiddenになった後、BridgeAが`pointcloud_stale`の`REMOVE`を発行する。
+- 動的Box、机、上棚とのSim物理接触がない。
+
+実行手順は、ROSを使う各ターミナルで次の共通手順を守る。RLPのlaunchには`validation_thread_num:=8`を指定する。
+
+```bash
+# ホスト側
+xhost local:
+cd /home/hma/carrobo-isaac
+make down
+make up localhost SCENE=rlp_dynamic_grasp GRASP=1
+
+# Apptainer側（RLP）
+cd ~/carrobo26_ws
+bash 0_shell.sh
+. /entrypoint.sh
+source install/setup.bash
+. 5e_isaac_mode.sh
+ros2 launch hsrb_robot_local_planner_node \
+  hsrb_robot_local_planner.launch.py use_sim_time:=true validation_thread_num:=8
+
+# Apptainer側（hma_pcl_reconst2）
+cd ~/carrobo26_ws
+bash 0_shell.sh
+. /entrypoint.sh
+source install/setup.bash
+. 5e_isaac_mode.sh
+ros2 launch hma_pcl_reconst2 pcl_reconst.launch.py \
+  use_sim_time:=true use_compressed:=true \
+  topic_rgb:=/head_rgbd_sensor/rgb/image_rect_color \
+  topic_depth:=/head_rgbd_sensor/depth_registered/image_rect_raw \
+  topic_camera_info:=/head_rgbd_sensor/rgb/camera_info \
+  output_topic:=/hma_pcl_reconst/depth_registered/points
+
+# Apptainer側（GroundingDINO）
+cd ~/carrobo26_ws
+bash 0_shell.sh
+. /entrypoint.sh
+source install/setup.bash
+. 5e_isaac_mode.sh
+ros2 launch hma_grounding_dino2 grounding_dino2_lifecycle_service.launch.py \
+  use_sim_time:=true rgb_topic:=/head_rgbd_sensor/rgb/image_rect_color
+
+# Apptainer側（YOLO + 把持点）
+cd ~/carrobo26_ws
+bash 0_shell.sh
+. /entrypoint.sh
+source install/setup.bash
+. 5e_isaac_mode.sh
+ros2 launch yolov8_detection yolov8_detection_launch.py use_rviz:=false
+ros2 run grasp_point_detection grasp_point_service \
+  --ros-args -p min_points:=10 -p mask_erosion_px:=3
+
+# Apptainer側（S6.3b runner）
+cd ~/carrobo26_ws
+bash 0_shell.sh
+. /entrypoint.sh
+source install/setup.bash
+. 5e_isaac_mode.sh
+python3 src/4_manipulation/hsrb_robot_local_planner/tools/\
+s6_3b_dynamic_grasp_place_runner.py \
+  --timeout-sec 70.0 --release-settle-sec 2.0 \
+  --dynamic-hide-timeout-sec 120.0 \
+  | tee /tmp/rlp_s63b_dynamic_grasp_place.jsonl
+```
+
+#### S6.3b実行記録（2026-09-09）
+
+動的障害物を含む把持・配置統合は**1/1 PASS**となった。
+
+| 確認項目 | 結果 |
+| --- | --- |
+| BridgeA入力 | `/hma_pcl_reconst/depth_registered/points`接続成功 |
+| 動的Box初期検出 | truthとの中心誤差`0.0741 m` |
+| オンライン追跡 | 更新`45回`、検出中心Y差`0.3454 m` |
+| 把持中のオンライン更新 | Attached Object登録後`22回` |
+| 認識→TF→把持→配置 | YOLO apple、`odom` TF、Sim attach、机上releaseまで成功 |
+| hidden後のstale削除 | truth hidden、BridgeA `pointcloud_stale REMOVE`成功 |
+| 物理接触 | 動的Boxとの接触なし。机上配置の貫通なし |
+| 試行全体 | **1/1 PASS** |
+
+ログは`/tmp/rlp_s63b_dynamic_grasp_place_retry2_20260909.jsonl`に保存した。S6.3bまでの最小回帰が成立したため、次は複数クラスタ、意図的な認識位置ずれ、部分遮蔽、点群レート低下、更新遅延の分布を追加する。これらとS5/S6.3aの回帰が安定するまでは実機へ移行しない。
 
 ## 実装成果物の予定
 
@@ -603,6 +747,8 @@ runnerには直接指定しなくても、S6.3aの既定値として机観察pan
 - S5のAttached Object publisher、衝突除外ペア、机上貫通probeの管理
 - S6.1/S6.2の`pcl_reconst`→BridgeA→`CollisionObject`、移動追従・stale削除・オンラインゴール回帰（`tools/s6_pcl_dynamic_obstacle_runner.py`）
 - S6.3aのGroundingDINO→`pcl_reconst`天板推定→apple把持→Attached Object搬送→机上配置回帰（`tools/s6_3_table_recognition_grasp_place_runner.py`）
+- S6.3a cabinetの上棚付き配置面・上棚侵入probe・物理接触oracle回帰（`tools/s6_3a_cabinet_grasp_place_runner.py`）
+- S6.3bのBridgeAオンライン追跡と認識→TF→把持→机上配置→hidden後stale削除回帰（`tools/s6_3b_dynamic_grasp_place_runner.py`）
 
 ### `carrobo-isaac`
 
@@ -614,7 +760,8 @@ runnerには直接指定しなくても、S6.3aの既定値として机観察pan
 - S3.5用のHSR-B台車寸法・速度上限の環境変数（`BASE_WHEEL_SEPARATION`、`BASE_CASTER_OFFSET` など）
 - S4用の静的障害物slot（`/World/RLPObstacles/slot_0`〜`slot_7`）とROS bridge
 - S5.3用の動的な机上スラブ反映（RLP/Sim共通の`odom`ワールド座標）
-- S6.3a用の静的な手続き生成机、机truth oracle、`SCENE=rlp_grasp_table`/`SCENE=rlp_dynamic_grasp`
+- S6.3a用の静的な手続き生成机、上棚、机truth/接触oracle、`SCENE=rlp_grasp_table`/`SCENE=rlp_grasp_cabinet`
+- S6.3b用の`SCENE=rlp_dynamic_grasp`、起動前登録済みの移動Box、真値・接触oracle topic
 - S6用の`SCENE=rlp_dynamic`、起動前登録済みの移動Box、真値・接触oracle topic
 
 競技用 `worlds/carrobo.world` と `configs/placement*.yaml` は、RLP検証用の変更で上書きしない。

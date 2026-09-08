@@ -458,6 +458,7 @@ class BridgeA:
                 item = {
                     "event": "bridge_update",
                     "object_id": self.config.object_id,
+                    "wall_time": now,
                     "center_xy": list(detected.center_xy),
                     "dimensions_xyz": list(detected.dimensions_xyz),
                     "bottom_z": detected.bottom_z,

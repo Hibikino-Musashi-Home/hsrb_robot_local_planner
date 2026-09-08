@@ -47,13 +47,21 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from shape_msgs.msg import SolidPrimitive
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Empty
 from tf2_ros import TransformBroadcaster
 
 from grasp_point_detection_interfaces.srv import GraspPointService
 from hma_grounding_dino2_interfaces.srv import Detection2DService
 from s4_obstacle_runner import Box, EnvironmentPublisher
+from s6_pcl_dynamic_obstacle_runner import (
+    BridgeA,
+    BridgeConfig,
+    TruthCapture as DynamicTruthCapture,
+    _center_error as _dynamic_center_error,
+    _closest_truth as _dynamic_closest_truth,
+    _wait_for_bridge_detection as _wait_for_dynamic_detection,
+)
 from tmc_planning_msgs.msg import ConstraintsStatus, RobotLocalPlannerStatus
 from yolov8_detection_interfaces.srv import ObjectDetectionService
 
@@ -70,6 +78,7 @@ SIM_GRASP_TOPIC = "/rlp_validation/grasp_state"
 TABLE_DETECTION_SERVICE = "/object_detection/grounding_dino2/service"
 TABLE_POINT_CLOUD_TOPIC = "/hma_pcl_reconst/depth_registered/points"
 TABLE_TRUTH_TOPIC = "/rlp_validation/table_truth"
+CABINET_CONTACT_TOPIC = "/rlp_validation/cabinet_contact"
 
 DONE_STATUSES = {ConstraintsStatus.SATISFIED, ConstraintsStatus.PREEMPTED}
 FAILURE_STATUSES = {
@@ -263,6 +272,29 @@ class TableTruthCapture:
                 return value
             time.sleep(0.05)
         return self.latest()
+
+
+class ContactCapture:
+    """Capture a Sim contact oracle for one static validation obstacle."""
+
+    def __init__(self, node: RobotLocalPlanner, topic: str) -> None:
+        self._lock = threading.Lock()
+        self._seen = False
+        node.create_subscription(
+            Bool,
+            topic,
+            self._callback,
+            qos_profile_sensor_data,
+        )
+
+    def _callback(self, msg: Bool) -> None:
+        if msg.data:
+            with self._lock:
+                self._seen = True
+
+    def seen(self) -> bool:
+        with self._lock:
+            return self._seen
 
 
 class FramePublisher:
@@ -1349,6 +1381,11 @@ def main(argv: list[str] | None = None) -> int:
         help="detect the placement table with GroundingDINO and PointCloud2",
     )
     parser.add_argument(
+        "--cabinet-overhead",
+        action="store_true",
+        help="add a static overhead shelf and verify a safe under-shelf placement",
+    )
+    parser.add_argument(
         "--table-only",
         action="store_true",
         help="stop after table detection/geometry validation (diagnostic mode)",
@@ -1387,6 +1424,49 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--table-size-x", type=float, default=0.35)
     parser.add_argument("--table-size-y", type=float, default=0.30)
     parser.add_argument("--table-thickness", type=float, default=0.04)
+    parser.add_argument("--cabinet-shelf-center-x", type=float, default=0.90)
+    # Keep the shelf over the rear half of the tabletop.  This leaves the
+    # front placement approach open while still making the overhead geometry
+    # part of the attached-object planning scene.
+    parser.add_argument("--cabinet-shelf-center-y", type=float, default=0.70)
+    parser.add_argument("--cabinet-shelf-bottom-z", type=float, default=0.62)
+    parser.add_argument("--cabinet-shelf-size-x", type=float, default=0.90)
+    parser.add_argument("--cabinet-shelf-size-y", type=float, default=0.16)
+    parser.add_argument("--cabinet-shelf-thickness", type=float, default=0.05)
+    parser.add_argument(
+        "--dynamic-bridge",
+        action="store_true",
+        help="run BridgeA online with the grasp/place sequence (S6.3b)",
+    )
+    parser.add_argument(
+        "--dynamic-object-id",
+        default="s6_3b_dynamic_obstacle",
+        help="RLP CollisionObject id used by the S6.3b BridgeA instance",
+    )
+    parser.add_argument(
+        "--dynamic-hide-timeout-sec",
+        type=float,
+        default=120.0,
+        help="wait for the Sim dynamic obstacle to become hidden after release",
+    )
+    parser.add_argument(
+        "--dynamic-stale-timeout-sec",
+        type=float,
+        default=1.0,
+        help="BridgeA stale timeout used by the S6.3b online bridge",
+    )
+    parser.add_argument(
+        "--place-offset-x",
+        type=float,
+        default=0.0,
+        help="offset of the selected tabletop placement center in odom x",
+    )
+    parser.add_argument(
+        "--place-offset-y",
+        type=float,
+        default=0.0,
+        help="offset of the selected tabletop placement center in odom y",
+    )
     parser.add_argument(
         "--place-clearance",
         type=float,
@@ -1419,6 +1499,37 @@ def main(argv: list[str] | None = None) -> int:
         else None
     )
     truth_capture = TableTruthCapture(node) if args.detect_table else None
+    cabinet_contact = (
+        ContactCapture(node, CABINET_CONTACT_TOPIC)
+        if args.cabinet_overhead
+        else None
+    )
+    dynamic_truth = DynamicTruthCapture(node) if args.dynamic_bridge else None
+    dynamic_bridge = (
+        BridgeA(
+            node,
+            BridgeConfig(
+                object_id=args.dynamic_object_id,
+                # The grasp scene also contains the tabletop and apple.  The
+                # negative-y crop and shape limits select only the moving box
+                # without using its Sim truth stream.
+                min_y=-1.00,
+                max_y=-0.12,
+                min_cluster_height=0.14,
+                min_dimension_xy=0.16,
+                min_dimension_z=0.20,
+                max_dimension_xy=0.55,
+                stale_timeout_sec=args.dynamic_stale_timeout_sec,
+                # A 5 Hz CollisionObject stream keeps invalidating long
+                # whole-body goals.  One update per second is still fast
+                # relative to the moving-box validation scene while allowing
+                # RLP to finish each grasp/place segment.
+                update_period_sec=1.0,
+            ),
+        )
+        if args.dynamic_bridge
+        else None
+    )
     environment_pub = node.create_publisher(CollisionObject, ENVIRONMENT_CONTROL_TOPIC, 10)
     obstacle_environment = (
         EnvironmentPublisher(node)
@@ -1448,10 +1559,23 @@ def main(argv: list[str] | None = None) -> int:
     table_box: Box | None = None
     table_collision_msg: CollisionObject | None = None
     table_in_planner = False
+    cabinet_box: Box | None = None
+    cabinet_collision_msg: CollisionObject | None = None
+    cabinet_in_planner = False
     environment_boxes: list[Box] = []
+    static_sim_environment_ids: set[str] = set()
     environment_reference_pose: tuple[float, float, float] | None = None
     sim_object_path = ""
-    stage_name = "S6.3" if args.detect_table else "S5"
+    dynamic_attached_wall = None
+    stage_name = (
+        "S6.3b"
+        if args.dynamic_bridge
+        else (
+            "S6.3a-cabinet"
+            if args.cabinet_overhead
+            else ("S6.3" if args.detect_table else "S5")
+        )
+    )
     result: dict[str, Any] = {
         "stage": stage_name,
         "target": args.target,
@@ -1473,6 +1597,14 @@ def main(argv: list[str] | None = None) -> int:
         "sim_grasp_topic": SIM_GRASP_TOPIC,
         "place_on_table": args.place_on_table,
         "detect_table": args.detect_table,
+        "cabinet_overhead": args.cabinet_overhead,
+        "dynamic_bridge": args.dynamic_bridge,
+        "dynamic_object_id": args.dynamic_object_id if args.dynamic_bridge else None,
+        "dynamic_truth_topic": (
+            "/rlp_validation/dynamic_obstacle_truth"
+            if args.dynamic_bridge
+            else None
+        ),
         "table_detection_service": (
             TABLE_DETECTION_SERVICE if args.detect_table else None
         ),
@@ -1567,6 +1699,60 @@ def main(argv: list[str] | None = None) -> int:
         if not result["steps"]["observation_pose"].get("physical_converged", False):
             raise RuntimeError("観察姿勢への移動に失敗しました")
         time.sleep(1.5)
+
+        if args.dynamic_bridge:
+            if dynamic_bridge is None or dynamic_truth is None:
+                raise RuntimeError("S6.3b BridgeA interfaceが初期化されていません")
+            dynamic_cloud_connected = dynamic_bridge.wait_for_cloud(10.0)
+            dynamic_truth_visible = dynamic_truth.wait_for(
+                lambda item: bool(item.get("visible")),
+                12.0,
+            )
+            dynamic_detected = _wait_for_dynamic_detection(dynamic_bridge, 12.0)
+            dynamic_initial_truth = (
+                _dynamic_closest_truth(dynamic_truth, dynamic_detected)
+                if dynamic_detected is not None
+                else None
+            )
+            dynamic_initial_error = (
+                _dynamic_center_error(dynamic_detected, dynamic_initial_truth)
+                if dynamic_detected is not None
+                else None
+            )
+            result["dynamic_obstacle"] = {
+                "object_id": args.dynamic_object_id,
+                "point_cloud_topic": TABLE_POINT_CLOUD_TOPIC,
+                "truth_topic": "/rlp_validation/dynamic_obstacle_truth",
+                "cloud_connected": dynamic_cloud_connected,
+                "truth_visible": dynamic_truth_visible is not None,
+                "initial_detected": dynamic_detected is not None,
+                "initial_center_error_m": dynamic_initial_error,
+                "detected_center_xy": (
+                    list(dynamic_detected.center_xy)
+                    if dynamic_detected is not None
+                    else None
+                ),
+                "truth_center_xy": (
+                    list(dynamic_initial_truth.get("center_world", [])[:2])
+                    if dynamic_initial_truth is not None
+                    else None
+                ),
+            }
+            _print_event({
+                "event": "dynamic_snapshot_check",
+                **result["dynamic_obstacle"],
+            })
+            if not dynamic_cloud_connected:
+                raise RuntimeError("S6.3bの点群入力を受信できませんでした")
+            if dynamic_truth_visible is None:
+                raise RuntimeError("S6.3bの動的障害物truthがvisibleになりませんでした")
+            if dynamic_detected is None:
+                raise RuntimeError("S6.3bの動的障害物をBridgeAが検出できませんでした")
+            if dynamic_initial_error is None or dynamic_initial_error > 0.20:
+                raise RuntimeError(
+                    "S6.3bのBridgeA検出中心誤差が大きすぎます: "
+                    f"{dynamic_initial_error} m"
+                )
 
         detection_attempts: list[list[str]] = []
         detections = None
@@ -1781,7 +1967,36 @@ def main(argv: list[str] | None = None) -> int:
                     table_collision_msg = EnvironmentPublisher._to_collision_object(
                         table_box
                     )
+                if args.detect_table:
+                    static_sim_environment_ids.add(table_box.name)
                 environment_boxes.append(table_box)
+                if args.cabinet_overhead:
+                    cabinet_box = Box(
+                        "s6_3_cabinet_overhead_shelf",
+                        (
+                            args.cabinet_shelf_center_x,
+                            args.cabinet_shelf_center_y,
+                        ),
+                        (
+                            args.cabinet_shelf_size_x,
+                            args.cabinet_shelf_size_y,
+                            args.cabinet_shelf_thickness,
+                        ),
+                        bottom_z=args.cabinet_shelf_bottom_z,
+                    )
+                    cabinet_collision_msg = (
+                        EnvironmentPublisher._to_collision_object(cabinet_box)
+                    )
+                    static_sim_environment_ids.add(cabinet_box.name)
+                    result["cabinet"] = {
+                        "id": cabinet_box.name,
+                        "frame": ODOM_FRAME,
+                        "center_xy": list(cabinet_box.center),
+                        "dimensions_xyz": list(cabinet_box.dimensions),
+                        "bottom_z": cabinet_box.bottom_z,
+                        "top_z": cabinet_box.bottom_z + cabinet_box.dimensions[2],
+                    }
+                    environment_boxes.append(cabinet_box)
             result["environment_boxes"] = [
                 {
                     "id": box.name,
@@ -1800,6 +2015,7 @@ def main(argv: list[str] | None = None) -> int:
             initial_environment_boxes = tuple(
                 box for box in environment_boxes
                 if box is not table_box
+                and box.name not in static_sim_environment_ids
             )
             result["steps"]["environment_add"] = (
                 obstacle_environment.publish_boxes(
@@ -1906,6 +2122,11 @@ def main(argv: list[str] | None = None) -> int:
         attached_in_planner = result["steps"]["attached_object_add"]
         if not attached_in_planner:
             raise RuntimeError("attached_object_publisherへの登録を確認できませんでした")
+        if args.dynamic_bridge:
+            dynamic_attached_wall = time.monotonic()
+            result.setdefault("dynamic_obstacle", {})[
+                "attached_history_start_wall"
+            ] = dynamic_attached_wall
 
         retreat_odom = geometry.Pose(
             geometry.Vector3(
@@ -1935,22 +2156,46 @@ def main(argv: list[str] | None = None) -> int:
             if obstacle_environment is None or environment_reference_pose is None:
                 raise RuntimeError("机上配置用の物理環境bridgeが初期化されていません")
 
-            if table_collision_msg is None:
-                raise RuntimeError("table_collision_msgが作成されていません")
+            if args.detect_table:
+                if table_collision_msg is None:
+                    raise RuntimeError("table_collision_msgが作成されていません")
 
-            # The procedural table is already a physical Sim collider.  Add
-            # only the measured tabletop patch to RLP after retreat; sending
-            # it through EnvironmentPublisher as well would create a second
-            # physical table and produce a false base-contact failure.
-            result["steps"]["environment_table_add"] = _publish_environment(
-                environment_pub,
-                capture,
-                table_collision_msg,
-                present=True,
-            )
-            table_in_planner = result["steps"]["environment_table_add"]
+                # The procedural table is already a physical Sim collider.
+                # Add only the measured tabletop patch to RLP after retreat;
+                # sending it through EnvironmentPublisher as well would
+                # create a second physical table and a false contact.
+                result["steps"]["environment_table_add"] = _publish_environment(
+                    environment_pub,
+                    capture,
+                    table_collision_msg,
+                    present=True,
+                )
+                table_in_planner = result["steps"]["environment_table_add"]
+            else:
+                # Preserve the original S5 fixed-table compatibility path:
+                # that table exists only when the physical bridge registers
+                # it after the attached-object retreat.
+                result["steps"]["environment_table_add"] = (
+                    obstacle_environment.publish_boxes(
+                        tuple(environment_boxes),
+                        reference_pose=environment_reference_pose,
+                    )
+                )
             if not result["steps"]["environment_table_add"]:
                 raise RuntimeError("机上配置前のtable登録を確認できませんでした")
+
+            if args.cabinet_overhead:
+                if cabinet_collision_msg is None or cabinet_box is None:
+                    raise RuntimeError("cabinet_collision_msgが作成されていません")
+                result["steps"]["environment_cabinet_add"] = _publish_environment(
+                    environment_pub,
+                    capture,
+                    cabinet_collision_msg,
+                    present=True,
+                )
+                cabinet_in_planner = result["steps"]["environment_cabinet_add"]
+                if not result["steps"]["environment_cabinet_add"]:
+                    raise RuntimeError("キャビネット上棚の登録を確認できませんでした")
 
             planner_object_to_hand_z = (
                 grasp_odom.pose.position.z - target_odom.pos.z
@@ -1965,6 +2210,10 @@ def main(argv: list[str] | None = None) -> int:
                 float(grasp_response.grasp.size.z) * 0.5,
             )
             table_top_z = table_box.bottom_z + table_box.dimensions[2]
+            place_center = (
+                table_box.center[0] + args.place_offset_x,
+                table_box.center[1] + args.place_offset_y,
+            )
             place_object_z = (
                 table_top_z
                 + object_half_z
@@ -1981,32 +2230,32 @@ def main(argv: list[str] | None = None) -> int:
             )
             place_high = geometry.Pose(
                 geometry.Vector3(
-                    table_box.center[0],
-                    table_box.center[1],
+                    place_center[0],
+                    place_center[1],
                     place_high_z,
                 ),
                 target_base.ori,
             )
             place_pre_drop = geometry.Pose(
                 geometry.Vector3(
-                    table_box.center[0],
-                    table_box.center[1],
+                    place_center[0],
+                    place_center[1],
                     place_pre_drop_z,
                 ),
                 target_base.ori,
             )
             probe_pose = geometry.Pose(
                 geometry.Vector3(
-                    table_box.center[0],
-                    table_box.center[1],
+                    place_center[0],
+                    place_center[1],
                     probe_hand_z,
                 ),
                 target_base.ori,
             )
             place_pose = geometry.Pose(
                 geometry.Vector3(
-                    table_box.center[0],
-                    table_box.center[1],
+                    place_center[0],
+                    place_center[1],
                     place_hand_z,
                 ),
                 target_base.ori,
@@ -2016,6 +2265,11 @@ def main(argv: list[str] | None = None) -> int:
                 "sim_object_to_hand_z_m": object_to_hand_z,
                 "estimated_object_half_z_m": object_half_z,
                 "table_top_z_m": table_top_z,
+                "placement_center_xy_m": list(place_center),
+                "placement_offset_xy_m": [
+                    args.place_offset_x,
+                    args.place_offset_y,
+                ],
                 "place_object_z_m": place_object_z,
                 "place_hand_z_m": place_hand_z,
                 "place_high_z_m": place_high_z,
@@ -2054,6 +2308,45 @@ def main(argv: list[str] | None = None) -> int:
             )
             if not _move_passed(result["steps"]["place_high_with_attached_object"]):
                 raise RuntimeError("Attached Objectを保持した机上高位置への移動に失敗しました")
+
+            if args.cabinet_overhead and cabinet_box is not None:
+                # The safe placement point is in the open front part of the
+                # cabinet.  First ask RLP to move the attached object into the
+                # overhead shelf itself; this must be rejected before the
+                # actual under-shelf placement continues.
+                shelf_probe_object_z = cabinet_box.bottom_z + 0.02
+                shelf_probe_hand_z = shelf_probe_object_z - object_to_hand_z
+                shelf_probe_pose = geometry.Pose(
+                    geometry.Vector3(
+                        cabinet_box.center[0],
+                        cabinet_box.center[1],
+                        shelf_probe_hand_z,
+                    ),
+                    target_base.ori,
+                )
+                result["cabinet_shelf_probe_geometry"] = {
+                    "probe_hand_z_m": shelf_probe_hand_z,
+                    "probe_object_origin_z_m": shelf_probe_object_z,
+                    "predicted_shelf_penetration_m": 0.02,
+                }
+                result["steps"]["cabinet_shelf_collision_probe"] = _move_pose(
+                    node,
+                    capture,
+                    "cabinet_shelf_collision_probe",
+                    shelf_probe_pose,
+                    args.timeout_sec,
+                    reference_frame=ODOM_FRAME,
+                    enable_base=True,
+                )
+                result["steps"]["cabinet_shelf_probe_rejected"] = _move_rejected(
+                    result["steps"]["cabinet_shelf_collision_probe"]
+                )
+                if not result["steps"]["cabinet_shelf_probe_rejected"]:
+                    raise RuntimeError(
+                        "Attached Objectをキャビネット上棚へ貫通させるprobeが拒否されませんでした"
+                    )
+                node.publish_empty_constraints()
+                time.sleep(0.5)
 
             # The hand center is intentionally still above the tabletop, while
             # the attached object's bottom is inside the tabletop slab.  A
@@ -2142,6 +2435,14 @@ def main(argv: list[str] | None = None) -> int:
                 and released_clearance.get("latest_origin_vertical_clearance_m") is not None
                 and released_clearance["latest_origin_vertical_clearance_m"] <= 0.12
             )
+            if cabinet_in_planner and cabinet_collision_msg is not None:
+                result["steps"]["environment_cabinet_remove"] = _publish_environment(
+                    environment_pub,
+                    capture,
+                    cabinet_collision_msg,
+                    present=False,
+                )
+                cabinet_in_planner = not result["steps"]["environment_cabinet_remove"]
             if table_in_planner and table_collision_msg is not None:
                 result["steps"]["environment_table_remove"] = _publish_environment(
                     environment_pub,
@@ -2150,6 +2451,8 @@ def main(argv: list[str] | None = None) -> int:
                     present=False,
                 )
                 table_in_planner = not result["steps"]["environment_table_remove"]
+        if cabinet_contact is not None:
+            result["steps"]["cabinet_physical_contact"] = cabinet_contact.seen()
         if obstacle_environment is not None:
             result["steps"]["physical_obstacle_contact"] = (
                 obstacle_environment.physical_contact_seen()
@@ -2158,6 +2461,85 @@ def main(argv: list[str] | None = None) -> int:
                 obstacle_environment.publish_boxes(())
             )
 
+        if args.dynamic_bridge:
+            if dynamic_bridge is None or dynamic_truth is None:
+                raise RuntimeError("S6.3b BridgeA interfaceが失われました")
+            history = dynamic_bridge.history()
+            updates = [
+                item for item in history
+                if item.get("event") == "bridge_update"
+            ]
+            attached_updates = [
+                item for item in updates
+                if dynamic_attached_wall is not None
+                and float(item.get("wall_time", 0.0)) >= dynamic_attached_wall
+            ]
+            detected_y = [
+                float(item["center_xy"][1])
+                for item in updates
+                if isinstance(item.get("center_xy"), list)
+                and len(item["center_xy"]) >= 2
+            ]
+            dynamic_y_delta = (
+                max(detected_y) - min(detected_y)
+                if len(detected_y) >= 2
+                else 0.0
+            )
+            dynamic_truth_hidden = dynamic_truth.wait_for(
+                lambda item: not bool(item.get("visible")),
+                max(1.0, args.dynamic_hide_timeout_sec),
+            )
+            stale_deadline = time.monotonic() + max(
+                3.0, args.dynamic_stale_timeout_sec + 2.0
+            )
+            dynamic_stale_removed = False
+            while time.monotonic() < stale_deadline:
+                dynamic_stale_removed = any(
+                    item.get("event") == "bridge_remove"
+                    and item.get("reason") == "pointcloud_stale"
+                    for item in dynamic_bridge.history()
+                )
+                if dynamic_stale_removed:
+                    break
+                time.sleep(0.10)
+            dynamic_physical_contact = dynamic_truth.contact_seen()
+            result["dynamic_obstacle"].update({
+                "updates_total": len(updates),
+                "updates_while_attached": len(attached_updates),
+                "motion_delta_y_m": dynamic_y_delta,
+                "motion_updated": dynamic_y_delta >= 0.20 and len(updates) >= 2,
+                "truth_hidden": dynamic_truth_hidden is not None,
+                "bridge_removed_stale_object": dynamic_stale_removed,
+                "physical_contact": dynamic_physical_contact,
+            })
+            _print_event({
+                "event": "dynamic_stale_check",
+                **result["dynamic_obstacle"],
+            })
+
+        dynamic_pass = bool(
+            not args.dynamic_bridge
+            or (
+                result.get("dynamic_obstacle", {}).get("cloud_connected", False)
+                and result.get("dynamic_obstacle", {}).get("truth_visible", False)
+                and result.get("dynamic_obstacle", {}).get("initial_detected", False)
+                and result.get("dynamic_obstacle", {}).get(
+                    "initial_center_error_m"
+                ) is not None
+                and result["dynamic_obstacle"]["initial_center_error_m"] <= 0.20
+                and result.get("dynamic_obstacle", {}).get("motion_updated", False)
+                and result.get("dynamic_obstacle", {}).get(
+                    "updates_while_attached", 0
+                ) >= 1
+                and result.get("dynamic_obstacle", {}).get("truth_hidden", False)
+                and result.get("dynamic_obstacle", {}).get(
+                    "bridge_removed_stale_object", False
+                )
+                and not result.get("dynamic_obstacle", {}).get(
+                    "physical_contact", True
+                )
+            )
+        )
         result["pass"] = bool(
             result["reset_ok"]
             and result["steps"]["environment_add_before_grasp"]
@@ -2194,9 +2576,26 @@ def main(argv: list[str] | None = None) -> int:
                     .get("attached_table_clearance", {})
                     .get("no_penetration", False)
                     and result["steps"].get("placed_on_table", False)
-                    and result["steps"].get("environment_table_remove", False)
+                    and result["steps"].get(
+                        "environment_table_remove",
+                        not args.detect_table,
+                    )
+                    and result["steps"].get(
+                        "environment_cabinet_add",
+                        not args.cabinet_overhead,
+                    )
+                    and result["steps"].get(
+                        "environment_cabinet_remove",
+                        not args.cabinet_overhead,
+                    )
+                    and not result["steps"].get("cabinet_physical_contact", False)
+                    and (
+                        not args.cabinet_overhead
+                        or result["steps"].get("cabinet_shelf_probe_rejected", False)
+                    )
                 )
             )
+            and dynamic_pass
         )
         result["reason"] = (
             "recognition_tf_grasp_attach_retreat_release"
@@ -2207,6 +2606,21 @@ def main(argv: list[str] | None = None) -> int:
         result["error"] = str(exc)
         _print_event({"event": "error", "stage": stage_name, "error": str(exc)})
     finally:
+        if dynamic_bridge is not None:
+            try:
+                dynamic_bridge.stop()
+            except Exception:
+                pass
+        if cabinet_in_planner and cabinet_collision_msg is not None:
+            try:
+                _publish_environment(
+                    environment_pub,
+                    capture,
+                    cabinet_collision_msg,
+                    present=False,
+                )
+            except Exception:
+                pass
         if table_in_planner and table_collision_msg is not None:
             try:
                 _publish_environment(

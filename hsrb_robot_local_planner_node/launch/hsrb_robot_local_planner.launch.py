@@ -7,6 +7,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetParameter
+from launch_ros.parameter_descriptions import ParameterValue
 from tmc_launch_ros_utils.tmc_launch_ros_utils import (
     load_collision_description,
     load_robot_description,
@@ -35,6 +36,10 @@ def declare_arguments():
             'trajectory_origin_frame',
             default_value='odom',
             description='Origin frame of path planning.'),
+        DeclareLaunchArgument(
+            'validation_thread_num',
+            default_value='8',
+            description='Number of collision-validation worker threads.'),
     ]
 
 
@@ -171,7 +176,8 @@ def generate_launch_description():
         # S4 Sim tuning (2026-09): validate the larger obstacle candidate set
         # without prematurely rejecting all candidates on the FCL deadline.
         'validate_timeout': 0.50,
-        'validation_thread_num': 8,
+        'validation_thread_num': ParameterValue(
+            LaunchConfiguration('validation_thread_num'), value_type=int),
         'collision_engine': 'fcl',
     }
 

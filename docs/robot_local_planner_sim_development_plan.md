@@ -68,6 +68,10 @@ make up localhost SCENE=rlp_empty
 # S4: RLP検証ランナーから同じ箱をRLPとPhysXへ登録
 make down
 make up localhost SCENE=rlp_empty
+
+# S5.1: 正面のappleを認識して把持し、Attached Objectのまま退避
+make down
+make up localhost SCENE=rlp GRASP=1
 ```
 
 RLPノードは別ターミナルで、Apptainerへ入ってからこのリポジトリのbuildを使い、`use_sim_time:=true` を付けて起動する。S0〜S2、S3.5、S4では `placement.rlp_empty.yaml`、S3では `placement.rlp.yaml` が使われる。
@@ -79,7 +83,7 @@ bash 0_shell.sh
 source install/setup.bash
 . 5e_isaac_mode.sh
 ros2 launch hsrb_robot_local_planner_node \
-  hsrb_robot_local_planner.launch.py use_sim_time:=true
+  hsrb_robot_local_planner.launch.py use_sim_time:=true validation_thread_num:=8
 ```
 
 ## 段階とSim環境の対応
@@ -92,7 +96,7 @@ ros2 launch hsrb_robot_local_planner_node \
 | S3: Simチューニング | 候補数、IK初期値、評価重み、到達判定、時間予算を一項目ずつ調整 | 正面に対象物を1個だけ配置。例: apple/canを `x=0.65〜0.70, y=0` | 目標姿勢への接近・退避を固定シナリオで反復できる。変更前後を同じ指標で比較できる |
 | S3.5: ハードウェアモデル整合 | `tread`、`caster_offset`、`wheel_radius`、台車/関節の速度・加速度上限を明示し、台車4ケース＋関節8ケースを確認 | S0〜S2と同じ空間。物体・家具・障害物なし。SimはHSR-Bモデル | RLPの実行時パラメータがプロファイルと一致し、計画軌道の制限内で全ケースがSUCCESS・収束。実機の校正値確定は含めない |
 | S4: 静的環境障害物 | `CollisionObject` の登録publisher、`odom`への座標変換、Sim PhysX scene bridge、回避経路と到達不能判定 | `rlp_validation.world`＋起動前登録済みの静的Box slot。runnerがケースごとに箱を切り替える | Sim上の障害物とRLPへ送った形状が一致し、RLPの計画軌道が接触せず回避。障害物を完全に塞いだ場合は失敗を正しく返す |
-| S5: 把持物体 | `attached_collision_objects`、把持中の衝突除外ペア、attach/release | S4の障害物＋正面の対象物。把持後に退避・搬送 | 把持前、把持中、解放後で形状が正しく切り替わる。指との常時接触で全滅しない |
+| S5: 把持物体 | S5.1で認識→把持点→TF→接近・把持、`attached_collision_objects`、把持中の衝突除外ペア、attach/release。S5.2でS4障害物との同時検証 | S5.1は`SCENE=rlp`の正面apple 1個。S5.2でS4のBoxを追加し、把持後に退避・搬送 | S5.1は認識結果から得た姿勢へ到達し、Sim物理把持とAttached Objectを同時に確認。S5.2は把持中の形状切替と障害物回避を確認 |
 | S6: 認識・動的環境 | PointCloud/検出結果からの形状化、更新周期、古い物体の削除 | 物体位置ずれ、複数障害物、最後に移動物体 | 座標変換、自己点群除去、形状数、更新遅延を含めて安定。静的シーンの回帰試験を壊さない |
 | S7: 実機移行 | 実機の速度・加速度・台車寸法・追従誤差に合わせる | Simと同じ固定シナリオを実機で再現 | まず無障害物・低速で確認し、S3〜S5相当のシナリオを順に実施 |
 
@@ -292,11 +296,89 @@ source install/setup.bash
 
 最初から薄い板や複雑なメッシュを使わない。衝突検証のサンプリング間隔や計算時間の問題と、形状の問題を分離できなくなるためである。
 
-### S5: 把持物体
+#### `validation_thread_num` 検証（S4完了条件）
 
-把持物体は、把持が確定したイベントで一度だけAttached Objectへ切り替える。物体を `hand_palm_link` に対する相対姿勢で表し、指先との接触ペアは必要なものだけ無効化する。解放時には空の `attached_collision_objects` を明示的に送る。
+`validation_thread_num` は、validatorの並列評価数としてS4の固定Boxシナリオで独立Sim起動ごとに比較した。各設定は同じ`avoidable_box` 3試行で、RLPのplanner SUCCESS、制約終端、controller/TF収束、Sim物理接触なしを合否にした。`status_wait_wall_sec` はrunnerが状態終端を待つエンドツーエンド時間であり、validator単体のCPU時間ではない。
 
-検証順は「把持前の接近 → attach → 障害物近傍を退避 → 解放 → attach解除」とする。把持物体を毎周期の認識結果として更新する処理はS6まで入れない。
+| `validation_thread_num` | 成功 | `status_wait_wall_sec` 平均 | 結論 |
+| ---: | ---: | ---: | --- |
+| 1 | 3/3 | 24.89 s | 機能PASS |
+| 2 | 3/3 | 26.30 s | 機能PASS |
+| 4 | 3/3 | 26.35 s | 機能PASS |
+| 8 | 3/3 | 27.11 s | 機能PASS |
+| 16 | 3/3 | 23.98 s | 機能PASS |
+
+独立したclean runでは1、2、4、8、16のすべてが3/3 PASSとなり、今回のSim負荷では明確な最適値は決められなかった。したがって、S4までの既存設定と整合する`validation_thread_num=8`をS5の基準値として維持する。途中の同一Simでの連続実行では、前試行の状態を引き継いだ失敗やTF NaNが発生したため、thread数の性能比較には使わず、各設定をSim再起動またはclean resetして比較する。
+
+### S5: 把持物体（S5.1 認識→TF→把持→Attached Object）
+
+S5.1では、競技アリーナや複数物体を使わず、既存の認識・把持点推定パッケージをそのまま接続する。
+
+- `yolov8_detection`: YOLO segmentationモデル（`yolov11-seg_wrc_ycb.pt`）で対象物名、bbox、mask、depth、camera infoを取得する。
+- `grasp_point_detection`: 認識結果のmask/depth/camera infoから把持姿勢、把持幅、物体サイズを推定する。
+- runnerは推定姿勢をカメラフレームからTF2で`base_link`と`odom`へ変換し、`odom -> s5_detected_object` と `odom -> s5_grasp_target` を公開する。
+- RLPのpregrasp・接触姿勢・把持後退避は、baseが動いても同じ場所を指し続けられるよう`odom`固定の姿勢で送る。`base_link`基準のまま送ると、`enable_base=true`のwhole-body動作で台車が動き、Sim上の物体との接触位置がずれる。
+- 観察姿勢の設定とグリッパ開閉は`hsrb_interface`、認識結果からのpregrasp・把持・退避はRLPを使う。観察姿勢の成否とRLPの把持動作の成否を分けて記録する。
+- 把持前は推定サイズのfree `CollisionObject`を登録し、接触姿勢へ入る前に一度削除する。グリッパを閉じてSimの物理把持を確認した後、同じ形状を`AttachedCollisionObject`として`hand_palm_link`へ追加する。touch linkは手掌と左右distal linkに限定する。
+- 退避後はrelease topicへobject IDを送り、Attached Objectを削除してfree `CollisionObject`を復元し、最後にグリッパを開く。
+- `GRASP=1`ではSim側がグリッパ近傍の対象物を物理的に追従させ、`/rlp_validation/grasp_state`へattach/releaseのSim真値を公開する。このSim補助は把持状態の検証用であり、実機グリッパの摩擦・接触性能を証明するものではない。
+
+S5.1の対象は`carrobo-isaac`の`placement.rlp.yaml`にある、`odom=(0.70, 0.00)`のYCB apple 1個とする。カメラから手先を見通せるよう、基準観察姿勢はhead pan `-0.65 rad`、head tilt `-50 deg`とする。YOLOは画像更新のタイミングによって一時的に検出を返さないことがあるため、runnerは最大5回まで対象名を再取得するが、対象名の曖昧な推測で別物体を選ばない。
+
+検証順は「Sim reset → 観察姿勢 → apple認識 → 把持点推定 → TF変換 → free object登録 → pregrasp → free object削除 → 接触姿勢 → Sim物理attach → Attached Object追加 → 退避 → release → free object復元 → Sim物理release」とする。把持物体を毎周期の認識結果として更新する処理はS6まで入れない。
+
+実行runnerは [`tools/s5_recognition_grasp_runner.py`](../tools/s5_recognition_grasp_runner.py) である。S5.1のコマンドは次のとおりである。
+
+```bash
+# ホスト側
+xhost local:
+cd /home/hma/carrobo-isaac
+make up localhost SCENE=rlp GRASP=1
+
+# Apptainer側（RLP launch用ターミナル）
+cd ~/carrobo26_ws
+bash 0_shell.sh
+. /entrypoint.sh
+source install/setup.bash
+. 5e_isaac_mode.sh
+ros2 launch hsrb_robot_local_planner_node \
+  hsrb_robot_local_planner.launch.py use_sim_time:=true validation_thread_num:=8
+
+# 別のApptainerターミナル（認識・把持点推定）
+cd ~/carrobo26_ws
+bash 0_shell.sh
+. /entrypoint.sh
+source install/setup.bash
+. 5e_isaac_mode.sh
+ros2 launch yolov8_detection yolov8_detection_launch.py use_rviz:=false
+ros2 run grasp_point_detection grasp_point_service
+
+# さらに別のApptainerターミナル（S5 runner）
+cd ~/carrobo26_ws
+bash 0_shell.sh
+. /entrypoint.sh
+source install/setup.bash
+. 5e_isaac_mode.sh
+python3 src/4_manipulation/hsrb_robot_local_planner/tools/s5_recognition_grasp_runner.py \
+  --target apple --object-id s5_detected_object --timeout-sec 55.0 \
+  | tee /tmp/rlp_s5_recognition_grasp.jsonl
+```
+
+#### S5.1実行記録（2026-09-08）
+
+上記の`SCENE=rlp`、`GRASP=1`、`validation_thread_num=8`で1試行し、**1/1 PASS**となった。YOLOは2回目の問い合わせで`apple`を検出し、score `0.579`、把持点推定値はカメラフレームから変換して`odom=(0.6881, -0.0686, 0.0639) m`となった。pregrasp、把持姿勢、退避はすべてRLP planner SUCCESS・制約終端・物理収束であった。
+
+| 確認項目 | 結果 |
+| --- | --- |
+| 認識 | `apple`、score `0.579` |
+| TF | `head_rgbd_sensor_rgb_frame` → `base_link`/`odom`、2つの検証用frameを公開 |
+| free `CollisionObject` | 把持前に追加、接触前に削除 |
+| RLP pregrasp / grasp / retreat | すべてSUCCESS、位置誤差 `6.6 mm` / `6.0 mm` / `14.0 mm` |
+| Sim物理把持 | `attached=true`、退避中の物体移動 `0.240 m` |
+| Attached Object | `hand_palm_link`へ追加を確認 |
+| 解放 | Attached Object削除、free形状復元、Sim `attached=false` |
+
+この結果で、S5.1の「認識結果をTFで固定座標へ変換し、RLPで把持位置へ移動し、把持中だけAttached Objectとして扱い、解放後にfree形状へ戻す」経路を確認できた。ただし、まだS4のBoxを同時に置いた搬送中の障害物検証は含めていない。次のS5.2では、S4の`one_side_pass`相当のBoxをappleの退避経路近傍へ追加し、Attached Objectを含む回避・接触除外・解放後の環境復元を検証する。
 
 ## 実装成果物の予定
 
@@ -307,6 +389,7 @@ source install/setup.bash
 - S3.5のハードウェアモデル監査・基準動作スクリプト（`tools/s35_hardware_model_runner.py`）
 - `planner_status` / `displacements` / 実行時間の記録
 - S4の `CollisionObject` publisher・Sim PhysX scene bridge・固定Boxシナリオ・回避/到達不能回帰（`tools/s4_obstacle_runner.py`）
+- S5.1の認識→TF→把持→Attached Object回帰（`tools/s5_recognition_grasp_runner.py`）
 - S5のAttached Object publisherと衝突除外ペアの管理
 
 ### `carrobo-isaac`
@@ -315,6 +398,7 @@ source install/setup.bash
 - `configs/placement.rlp_empty.yaml`: S0〜S2用の空配置設定
 - `configs/placement.rlp.yaml`: 正面対象物だけを置く配置設定
 - RLP用world/configの切替機構
+- S5.1用の`GRASP=1`物理把持状態publisher（`/rlp_validation/grasp_state`）
 - S3.5用のHSR-B台車寸法・速度上限の環境変数（`BASE_WHEEL_SEPARATION`、`BASE_CASTER_OFFSET` など）
 - S4用の静的障害物slot（`/World/RLPObstacles/slot_0`〜`slot_7`）とROS bridge
 

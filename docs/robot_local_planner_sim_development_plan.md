@@ -759,6 +759,25 @@ s6_3b_dynamic_grasp_place_runner.py \
 
 ログは`/tmp/rlp_s63b_dynamic_grasp_place_retry2_20260909.jsonl`に保存した。S6.3bまでの最小回帰が成立したため、次は複数クラスタ、意図的な認識位置ずれ、部分遮蔽、点群レート低下、更新遅延の分布を追加する。これらとS5/S6.3aの回帰が安定するまでは実機へ移行しない。
 
+#### S6.3b再実行記録（2026-09-09、Attached Object probe修正版）
+
+前回の実行条件をクリーンスタートで再実行した。通常のトップダウン配置では、RLPの`Attached Object`が保持するplanner/TF基準の物体―手先Zオフセット（`-0.050 m`）で机貫通probeを作る必要がある。Simの把持oracleが返す物理物体原点オフセット（約`-0.111 m`）をそのprobeに使うと、Sim上の物理形状確認には適していても、RLPの検証目標とフレームが一致せず、誤ってprobeを通してしまう。このフレームを修正した回帰は**1/1 PASS**となった。
+
+| 確認項目 | 結果 |
+| --- | --- |
+| BridgeA入力 | `/hma_pcl_reconst/depth_registered/points`接続成功 |
+| 動的Box初期検出 | truthとの中心誤差`0.0741 m` |
+| オンライン追跡 | 更新`43回`、検出中心Y差`0.3330 m` |
+| 把持中のオンライン更新 | Attached Object登録後`21回` |
+| 認識→TF→把持→配置 | YOLO apple（score`0.839`）、`odom` TF、Sim attach、机上releaseまで成功 |
+| Attached Objectの机貫通probe | planner status`-4`（`VALIDATION_FAILURE`）で拒否 |
+| 配置中の机上クリアランス | 最小`3.35 mm`、貫通なし。`placed_on_table=true` |
+| hidden後のstale削除 | truth hidden、BridgeA `pointcloud_stale REMOVE`成功 |
+| 物理接触 | 動的Box・机との接触なし |
+| 試行全体 | **1/1 PASS** |
+
+ログは`/tmp/rlp_s63b_dynamic_grasp_place_20260909_rerun2.jsonl`に保存した。なお、GroundingDINO/PCLの机検出パッチは観測中心ベースで生成するため、今回のログではSim truthとの机中心照合は合格条件に含めていない（`truth_check.pass=false`）が、実際のRLP配置では机上中心内・貫通なし・解放後残留を確認した。S6.3bの最小統合回帰は修正版でも成立したため、次は複数クラスタ、意図的な認識位置ずれ、部分遮蔽、点群レート低下、更新遅延の分布を追加する。これらとS5/S6.3aの回帰が安定するまでは実機へ移行しない。
+
 ## 実装成果物の予定
 
 ### このリポジトリ

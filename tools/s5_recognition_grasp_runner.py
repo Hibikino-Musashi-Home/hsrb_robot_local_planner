@@ -2353,10 +2353,17 @@ def main(argv: list[str] | None = None) -> int:
             )
             if cabinet_side_insertion:
                 placement_mode = "horizontal_side_insertion"
+            # The normal top-down attached-object pose is the planner/TF
+            # offset.  The Sim grasp oracle reports a physical object-origin
+            # offset that is useful for carried-object clearance, but it is
+            # not the same frame-relative offset stored by
+            # attached_object_publisher.  Use the planner offset for this
+            # RLP-only penetration probe; cabinet side insertion overrides it
+            # below with its rotated placement offset.
             probe_hand_z = (
                 probe_object_bottom_z
                 + object_half_z
-                - placement_object_to_hand_z
+                - planner_object_to_hand_z
             )
             place_high = geometry.Pose(
                 geometry.Vector3(
@@ -2554,6 +2561,11 @@ def main(argv: list[str] | None = None) -> int:
                 "probe_hand_z_m": probe_hand_z,
                 "probe_predicted_object_bottom_z_m": probe_object_bottom_z,
                 "probe_predicted_penetration_m": args.probe_penetration,
+                "probe_object_to_hand_z_m": (
+                    placement_object_to_hand_z
+                    if cabinet_side_insertion
+                    else planner_object_to_hand_z
+                ),
                 "placement_mode": placement_mode,
                 "placement_orientation_quaternion": [
                     placement_orientation.x,

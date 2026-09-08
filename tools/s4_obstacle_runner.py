@@ -70,12 +70,18 @@ DIAGNOSTIC_ROBOT_RADIUS = 0.24
 
 @dataclass(frozen=True)
 class Box:
-    """An axis-aligned box in odom, with dimensions in x/y/z."""
+    """A box in odom, with dimensions in x/y/z.
+
+    ``bottom_z`` is zero for the original S4 floor obstacles.  It is optional
+    so the same bridge can also represent an elevated tabletop slab in S5
+    without changing the existing S4 scenarios.
+    """
 
     name: str
     center: tuple[float, float]
     dimensions: tuple[float, float, float]
     yaw: float = 0.0
+    bottom_z: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -267,8 +273,15 @@ class EnvironmentPublisher:
                 cos_yaw * dx + sin_yaw * dy,
                 -sin_yaw * dx + cos_yaw * dy,
             ],
+            # Keep the odom/world representation as well.  The local form is
+            # retained for compatibility with older Isaac Sim bridges, while
+            # the world form prevents a delayed S5 tabletop registration from
+            # being reinterpreted against the robot's newer base pose.
+            "center_world": list(box.center),
             "dimensions_xyz": list(box.dimensions),
             "yaw_local": box.yaw - reference_yaw,
+            "yaw_world": box.yaw,
+            "bottom_z": box.bottom_z,
         }
 
     @staticmethod
@@ -278,7 +291,7 @@ class EnvironmentPublisher:
         object_msg.id = box.name
         object_msg.pose.position.x = box.center[0]
         object_msg.pose.position.y = box.center[1]
-        object_msg.pose.position.z = box.dimensions[2] * 0.5
+        object_msg.pose.position.z = box.bottom_z + box.dimensions[2] * 0.5
         object_msg.pose.orientation.z = math.sin(box.yaw * 0.5)
         object_msg.pose.orientation.w = math.cos(box.yaw * 0.5)
 

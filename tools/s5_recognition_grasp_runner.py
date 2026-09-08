@@ -272,6 +272,34 @@ def _compose_odom_pose(
     )
 
 
+def _local_xy_to_odom(
+    reference_pose: tuple[float, float, float],
+    local_x: float,
+    local_y: float,
+) -> tuple[float, float]:
+    """Convert a point expressed in the current base frame to odom."""
+    reference_x, reference_y, reference_yaw = reference_pose
+    cos_yaw = math.cos(reference_yaw)
+    sin_yaw = math.sin(reference_yaw)
+    return (
+        reference_x + cos_yaw * local_x - sin_yaw * local_y,
+        reference_y + sin_yaw * local_x + cos_yaw * local_y,
+    )
+
+
+def _yaw_from_quaternion(rotation: Any) -> float:
+    return math.atan2(
+        2.0 * (
+            rotation.w * rotation.z
+            + rotation.x * rotation.y
+        ),
+        1.0 - 2.0 * (
+            rotation.y * rotation.y
+            + rotation.z * rotation.z
+        ),
+    )
+
+
 def _lookup_transform(
     node: RobotLocalPlanner,
     target_frame: str,
@@ -460,6 +488,7 @@ def _move_pose(
     target: geometry.Pose,
     timeout_sec: float,
     reference_frame: str = ODOM_FRAME,
+    enable_base: bool = False,
 ) -> dict[str, Any]:
     if reference_frame == ODOM_FRAME:
         target_odom = target
@@ -474,15 +503,29 @@ def _move_pose(
         target,
         ref_frame_id=reference_frame,
         normalized_velocity=0.5,
+        enable_base=enable_base,
     )
     planner_status, constraint_status, planner_statuses, wait_sec = _wait_for_goal(
         capture, goal_id, timeout_sec
     )
-    physical = _wait_for_hand(
-        node,
-        target_odom,
-        max(1.0, timeout_sec - wait_sec),
+    planner_failed = bool(
+        any(status in FAILURE_STATUSES for status in planner_statuses)
+        and RobotLocalPlannerStatus.SUCCESS not in planner_statuses
     )
+    if planner_failed:
+        # A deliberately unsafe collision probe is expected to fail before the
+        # controller moves.  Do not spend the remaining motion timeout waiting
+        # for a hand pose that must not be reached.
+        physical = {
+            "physical_converged": False,
+            "physical_wait_skipped": True,
+        }
+    else:
+        physical = _wait_for_hand(
+            node,
+            target_odom,
+            max(1.0, timeout_sec - wait_sec),
+        )
     if RobotLocalPlannerStatus.SUCCESS in planner_statuses:
         planner_status = RobotLocalPlannerStatus.SUCCESS
     return {
@@ -514,6 +557,14 @@ def _move_passed(result: dict[str, Any]) -> bool:
         result.get("planner_status") == RobotLocalPlannerStatus.SUCCESS
         and result.get("constraint_status") in DONE_STATUSES
         and result.get("physical_converged", False)
+    )
+
+
+def _move_rejected(result: dict[str, Any]) -> bool:
+    """Return true when RLP rejected a target during planning/validation."""
+    return bool(
+        any(status in FAILURE_STATUSES for status in result.get("planner_statuses", []))
+        and RobotLocalPlannerStatus.SUCCESS not in result.get("planner_statuses", [])
     )
 
 
@@ -624,6 +675,155 @@ def _sim_carried_motion(capture: Capture, attached: bool = True) -> float | None
     return math.sqrt(sum((a - b) ** 2 for a, b in zip(first, last)))
 
 
+def _sim_object_samples(
+    capture: Capture,
+    object_path: str,
+    attached: bool,
+) -> list[tuple[float, tuple[float, float, float]]]:
+    """Return simulator object positions for one grasp-state phase."""
+    samples: list[tuple[float, tuple[float, float, float]]] = []
+    for stamp, state in capture.sim_history_copy():
+        if bool(state.get("attached", False)) != attached:
+            continue
+        for obj in state.get("objects", []):
+            if obj.get("path") != object_path:
+                continue
+            position = obj.get("position")
+            if isinstance(position, list) and len(position) == 3:
+                samples.append(
+                    (
+                        stamp,
+                        tuple(float(value) for value in position),
+                    )
+                )
+    return samples
+
+
+def _table_clearance_report(
+    capture: Capture,
+    table: Box,
+    object_path: str,
+    object_size: Any,
+    attached: bool,
+) -> dict[str, Any]:
+    """Measure object/table AABB clearance from the simulator truth stream."""
+    half_object = (
+        max(0.005, float(object_size.x) * 0.5),
+        max(0.005, float(object_size.y) * 0.5),
+        max(0.005, float(object_size.z) * 0.5),
+    )
+    half_table = (
+        table.dimensions[0] * 0.5,
+        table.dimensions[1] * 0.5,
+    )
+    table_top = table.bottom_z + table.dimensions[2]
+    # The YCB apple body path in SCENE=rlp uses a floor/contact reference at
+    # its rigid-body origin.  Use a conservative physical height so an apple
+    # below an elevated tabletop is not mistaken for a collision merely
+    # because its origin z is lower than the tabletop top.
+    physical_object_height = max(0.09, float(object_size.z))
+    samples = _sim_object_samples(capture, object_path, attached)
+    overlap_samples: list[dict[str, Any]] = []
+    center_inside_samples = 0
+    for stamp, position in samples:
+        dx = abs(position[0] - table.center[0])
+        dy = abs(position[1] - table.center[1])
+        center_inside = dx <= half_table[0] and dy <= half_table[1]
+        if center_inside:
+            center_inside_samples += 1
+        horizontal_overlap = (
+            dx <= half_table[0] + half_object[0]
+            and dy <= half_table[1] + half_object[1]
+        )
+        if not horizontal_overlap:
+            continue
+        object_bottom = position[2]
+        object_top = position[2] + physical_object_height
+        if object_top < table.bottom_z:
+            clearance = table.bottom_z - object_top
+        elif object_bottom > table_top:
+            clearance = object_bottom - table_top
+        else:
+            clearance = -min(
+                object_top - table.bottom_z,
+                table_top - object_bottom,
+            )
+        estimated_shape_clearance = position[2] - half_object[2] - table_top
+        overlap_samples.append(
+            {
+                "position": list(position),
+                "vertical_clearance_m": clearance,
+                # In the SCENE=rlp YCB placement, the rigid-body origin is
+                # the model's floor/contact reference rather than its visual
+                # center.  Keep this independent diagnostic for the physical
+                # table support check.
+                "origin_vertical_clearance_m": position[2] - table_top,
+                "estimated_shape_vertical_clearance_m": estimated_shape_clearance,
+                "center_inside_table": center_inside,
+                "penetration_m": max(0.0, -clearance),
+                "stamp_monotonic": stamp,
+            }
+        )
+
+    latest = overlap_samples[-1] if overlap_samples else None
+    min_clearance = (
+        min(item["vertical_clearance_m"] for item in overlap_samples)
+        if overlap_samples
+        else None
+    )
+    min_origin_clearance = (
+        min(item["origin_vertical_clearance_m"] for item in overlap_samples)
+        if overlap_samples
+        else None
+    )
+    return {
+        "table_id": table.name,
+        "table_top_z": table_top,
+        "object_path": object_path,
+        "object_half_size_xyz": list(half_object),
+        "physical_object_height_m": physical_object_height,
+        "physical_geometry_assumption": (
+            "SCENE=rlp YCB apple body origin is treated as the lower/contact reference"
+        ),
+        "sample_count": len(samples),
+        "horizontal_overlap_sample_count": len(overlap_samples),
+        "center_inside_sample_count": center_inside_samples,
+        "min_vertical_clearance_m": min_clearance,
+        "max_penetration_m": (
+            max(item["penetration_m"] for item in overlap_samples)
+            if overlap_samples
+            else None
+        ),
+        "min_origin_vertical_clearance_m": min_origin_clearance,
+        "latest_origin_vertical_clearance_m": (
+            latest["origin_vertical_clearance_m"] if latest is not None else None
+        ),
+        "origin_no_penetration": bool(
+            overlap_samples
+            and min_origin_clearance is not None
+            and min_origin_clearance >= -0.005
+        ),
+        "latest_overlap": latest is not None,
+        "latest_center_inside_table": bool(
+            latest is not None and latest["center_inside_table"]
+        ),
+        "latest_position": latest["position"] if latest is not None else None,
+        "latest_vertical_clearance_m": (
+            latest["vertical_clearance_m"] if latest is not None else None
+        ),
+        "latest_estimated_shape_clearance_m": (
+            latest["estimated_shape_vertical_clearance_m"]
+            if latest is not None
+            else None
+        ),
+        "no_penetration": bool(
+            overlap_samples
+            and min_clearance is not None
+            and min_clearance >= -0.005
+        ),
+    }
+
+
 def _collision_object(
     object_id: str,
     pose_odom: PoseStamped,
@@ -700,6 +900,31 @@ def main() -> int:
         action="store_true",
         help="also register the S4-style side box in RLP and Isaac Sim",
     )
+    parser.add_argument(
+        "--place-on-table",
+        action="store_true",
+        help="validate attached-object transfer, placement, and release on a tabletop",
+    )
+    parser.add_argument("--table-center-x", type=float, default=0.82)
+    parser.add_argument("--table-center-y", type=float, default=0.25)
+    parser.add_argument("--table-bottom-z", type=float, default=0.30)
+    parser.add_argument("--table-size-x", type=float, default=0.35)
+    parser.add_argument("--table-size-y", type=float, default=0.30)
+    parser.add_argument("--table-thickness", type=float, default=0.04)
+    parser.add_argument(
+        "--place-clearance",
+        type=float,
+        default=0.10,
+        help="clearance above the tabletop used before opening the gripper",
+    )
+    parser.add_argument("--place-high-offset", type=float, default=0.05)
+    parser.add_argument(
+        "--probe-penetration",
+        type=float,
+        default=0.02,
+        help="deliberate object/table overlap used to verify Attached Object rejection",
+    )
+    parser.add_argument("--release-settle-sec", type=float, default=2.0)
     parser.add_argument("--timeout-sec", type=float, default=55.0)
     parser.add_argument("--reset-settle-sec", type=float, default=2.0)
     args = parser.parse_args()
@@ -710,7 +935,11 @@ def main() -> int:
     capture = Capture(node)
     frames = FramePublisher(node)
     environment_pub = node.create_publisher(CollisionObject, ENVIRONMENT_CONTROL_TOPIC, 10)
-    obstacle_environment = EnvironmentPublisher(node) if args.with_obstacle else None
+    obstacle_environment = (
+        EnvironmentPublisher(node)
+        if args.with_obstacle or args.place_on_table
+        else None
+    )
     attach_pub = node.create_publisher(AttachedCollisionObject, ATTACH_TOPIC, 10)
     release_pub = node.create_publisher(String, RELEASE_TOPIC, 10)
     detect_client = node.create_client(ObjectDetectionService, "/yolov8_detection/service")
@@ -726,6 +955,10 @@ def main() -> int:
     attached_in_planner = False
     object_msg: CollisionObject | None = None
     obstacle_box: Box | None = None
+    table_box: Box | None = None
+    environment_boxes: list[Box] = []
+    environment_reference_pose: tuple[float, float, float] | None = None
+    sim_object_path = ""
     result: dict[str, Any] = {
         "stage": "S5",
         "target": args.target,
@@ -745,6 +978,7 @@ def main() -> int:
         "attach_topic": ATTACH_TOPIC,
         "attached_topic": ATTACHED_TOPIC,
         "sim_grasp_topic": SIM_GRASP_TOPIC,
+        "place_on_table": args.place_on_table,
     })
 
     try:
@@ -954,43 +1188,84 @@ def main() -> int:
             base_pose = (
                 base_tf.translation.x,
                 base_tf.translation.y,
-                math.atan2(
-                    2.0 * (
-                        base_tf.rotation.w * base_tf.rotation.z
-                        + base_tf.rotation.x * base_tf.rotation.y
-                    ),
-                    1.0
-                    - 2.0 * (
-                        base_tf.rotation.y * base_tf.rotation.y
-                        + base_tf.rotation.z * base_tf.rotation.z
-                    ),
-                ),
+                _yaw_from_quaternion(base_tf.rotation),
             )
-            # Keep the low box beside the arm's vertical carry path.  This is
-            # the S5.2 first integration slice: the same obstacle exists in
-            # the RLP PlanningScene and as a PhysX collider while the object
-            # changes from free to attached and back.
-            obstacle_box = Box(
-                "s5_side_obstacle",
-                (base_pose[0] + 0.55, base_pose[1] + 0.25),
-                (0.30, 0.40, 0.30),
-            )
-            result["obstacle"] = {
-                "id": obstacle_box.name,
-                "frame": ODOM_FRAME,
-                "center_xy": list(obstacle_box.center),
-                "dimensions_xyz": list(obstacle_box.dimensions),
-            }
+            environment_reference_pose = base_pose
+            if args.with_obstacle:
+                # Keep the low box beside the arm's vertical carry path.  This
+                # is the S5.2 integration slice: the same obstacle exists in
+                # the RLP PlanningScene and as a PhysX collider while the
+                # object changes from free to attached and back.
+                obstacle_box = Box(
+                    "s5_side_obstacle",
+                    _local_xy_to_odom(base_pose, 0.55, 0.25),
+                    (0.30, 0.40, 0.30),
+                )
+                environment_boxes.append(obstacle_box)
+                result["obstacle"] = {
+                    "id": obstacle_box.name,
+                    "frame": ODOM_FRAME,
+                    "center_xy": list(obstacle_box.center),
+                    "dimensions_xyz": list(obstacle_box.dimensions),
+                    "bottom_z": obstacle_box.bottom_z,
+                }
+            if args.place_on_table:
+                # First placement slice: an elevated tabletop collision slab.
+                # It is deliberately independent of the competition furniture
+                # so the RLP and PhysX geometry can be compared exactly.
+                table_box = Box(
+                    "s5_tabletop",
+                    _local_xy_to_odom(
+                        base_pose,
+                        args.table_center_x,
+                        args.table_center_y,
+                    ),
+                    (args.table_size_x,
+                     args.table_size_y,
+                     args.table_thickness),
+                    bottom_z=args.table_bottom_z,
+                )
+                environment_boxes.append(table_box)
+                result["table"] = {
+                    "id": table_box.name,
+                    "frame": ODOM_FRAME,
+                    "center_xy": list(table_box.center),
+                    "dimensions_xyz": list(table_box.dimensions),
+                    "bottom_z": table_box.bottom_z,
+                    "top_z": table_box.bottom_z + table_box.dimensions[2],
+                }
+            result["environment_boxes"] = [
+                {
+                    "id": box.name,
+                    "center_xy": list(box.center),
+                    "dimensions_xyz": list(box.dimensions),
+                    "bottom_z": box.bottom_z,
+                }
+                for box in environment_boxes
+            ]
             if not obstacle_environment.wait_for_subscriber():
-                raise RuntimeError("S4/S5物理障害物bridgeのsubscriberがありません")
-            result["steps"]["environment_obstacle_add"] = (
+                raise RuntimeError("S4/S5物理環境bridgeのsubscriberがありません")
+            # Do not expose the tabletop while the robot is still moving the
+            # base to the grasp pose.  The placement slice registers it after
+            # the attached-object retreat, when the table becomes part of the
+            # collision model for all subsequent whole-body motions.
+            initial_environment_boxes = tuple(
+                box for box in environment_boxes
+                if box is not table_box
+            )
+            result["steps"]["environment_add"] = (
                 obstacle_environment.publish_boxes(
-                    (obstacle_box,),
+                    initial_environment_boxes,
                     reference_pose=base_pose,
                 )
             )
-            if not result["steps"]["environment_obstacle_add"]:
-                raise RuntimeError("S5側方障害物の登録を確認できませんでした")
+            result["steps"]["environment_obstacle_add"] = result["steps"]["environment_add"]
+            result["steps"]["environment_table_add"] = (
+                not args.place_on_table
+                and result["steps"]["environment_add"]
+            )
+            if not result["steps"]["environment_add"]:
+                raise RuntimeError("S5物理環境の登録を確認できませんでした")
 
         object_msg = _collision_object(args.object_id, grasp_odom, grasp_response.grasp.size)
         result["steps"]["environment_add_before_grasp"] = _publish_environment(
@@ -1003,7 +1278,13 @@ def main() -> int:
             raise RuntimeError("把持対象CollisionObjectを環境へ登録できませんでした")
 
         result["steps"]["pregrasp"] = _move_pose(
-            node, capture, "pregrasp", pregrasp_odom, args.timeout_sec
+            node,
+            capture,
+            "pregrasp",
+            pregrasp_odom,
+            args.timeout_sec,
+            reference_frame=ODOM_FRAME,
+            enable_base=True,
         )
         if not _move_passed(result["steps"]["pregrasp"]):
             raise RuntimeError("pregraspへのRLP移動に失敗しました")
@@ -1021,7 +1302,13 @@ def main() -> int:
             raise RuntimeError("把持前のCollisionObject解除を確認できませんでした")
 
         result["steps"]["grasp_pose"] = _move_pose(
-            node, capture, "grasp_pose", target_odom, args.timeout_sec
+            node,
+            capture,
+            "grasp_pose",
+            target_odom,
+            args.timeout_sec,
+            reference_frame=ODOM_FRAME,
+            enable_base=True,
         )
         if not _move_passed(result["steps"]["grasp_pose"]):
             raise RuntimeError("把持姿勢へのRLP移動に失敗しました")
@@ -1035,6 +1322,29 @@ def main() -> int:
             raise RuntimeError(
                 "グリッパ動作後にSimの物理把持状態(attached=true)を確認できませんでした"
             )
+        sim_state = capture.latest_sim_state() or {}
+        sim_object_path = str(sim_state.get("object_path", ""))
+        result["sim_object_path"] = sim_object_path
+        if not sim_object_path:
+            raise RuntimeError("Simの把持対象object_pathを取得できませんでした")
+        sim_hand_position = sim_state.get("hand_position")
+        sim_object_position = next(
+            (
+                item.get("position")
+                for item in sim_state.get("objects", [])
+                if item.get("path") == sim_object_path
+            ),
+        )
+        if (
+            isinstance(sim_hand_position, list)
+            and len(sim_hand_position) == 3
+            and isinstance(sim_object_position, list)
+            and len(sim_object_position) == 3
+        ):
+            result["sim_object_to_hand_offset_xyz"] = [
+                float(sim_object_position[index]) - float(sim_hand_position[index])
+                for index in range(3)
+            ]
 
         attached_msg = _attached_object(object_msg)
         if not _wait_for_topic_subscriber(attach_pub):
@@ -1058,12 +1368,196 @@ def main() -> int:
             target_odom.ori,
         )
         result["steps"]["retreat_with_attached_object"] = _move_pose(
-            node, capture, "retreat_with_attached_object", retreat_odom, args.timeout_sec
+            node,
+            capture,
+            "retreat_with_attached_object",
+            retreat_odom,
+            args.timeout_sec,
+            reference_frame=ODOM_FRAME,
+            enable_base=True,
         )
         if not _move_passed(result["steps"]["retreat_with_attached_object"]):
             raise RuntimeError("Attached Objectを保持した退避動作に失敗しました")
         time.sleep(1.0)
         result["physical_carried_motion_m"] = _sim_carried_motion(capture, attached=True)
+
+        if args.place_on_table:
+            if table_box is None:
+                raise RuntimeError("table_boxが作成されていません")
+            if obstacle_environment is None or environment_reference_pose is None:
+                raise RuntimeError("机上配置用の物理環境bridgeが初期化されていません")
+
+            # The base is allowed to reach the initial grasp pose before the
+            # table is introduced.  From this point the table is part of both
+            # collision worlds.  Placement targets stay in odom so RLP can use
+            # the arm/base combination needed by this HSR configuration.
+            result["steps"]["environment_table_add"] = (
+                obstacle_environment.publish_boxes(
+                    tuple(environment_boxes),
+                    reference_pose=environment_reference_pose,
+                )
+            )
+            if not result["steps"]["environment_table_add"]:
+                raise RuntimeError("机上配置前のtable登録を確認できませんでした")
+
+            planner_object_to_hand_z = (
+                grasp_odom.pose.position.z - target_odom.pos.z
+            )
+            object_to_hand_z = (
+                result.get("sim_object_to_hand_offset_xyz", [0.0, 0.0, None])[2]
+            )
+            if object_to_hand_z is None:
+                object_to_hand_z = planner_object_to_hand_z
+            object_half_z = max(
+                0.005,
+                float(grasp_response.grasp.size.z) * 0.5,
+            )
+            table_top_z = table_box.bottom_z + table_box.dimensions[2]
+            place_object_z = (
+                table_top_z
+                + object_half_z
+                + args.place_clearance
+            )
+            place_hand_z = place_object_z - object_to_hand_z
+            place_high_z = place_hand_z + args.place_high_offset
+            place_pre_drop_z = place_hand_z + 0.10
+            probe_object_bottom_z = table_top_z - args.probe_penetration
+            probe_hand_z = (
+                probe_object_bottom_z
+                + object_half_z
+                - planner_object_to_hand_z
+            )
+            place_high = geometry.Pose(
+                geometry.Vector3(
+                    table_box.center[0],
+                    table_box.center[1],
+                    place_high_z,
+                ),
+                target_base.ori,
+            )
+            place_pre_drop = geometry.Pose(
+                geometry.Vector3(
+                    table_box.center[0],
+                    table_box.center[1],
+                    place_pre_drop_z,
+                ),
+                target_base.ori,
+            )
+            probe_pose = geometry.Pose(
+                geometry.Vector3(
+                    table_box.center[0],
+                    table_box.center[1],
+                    probe_hand_z,
+                ),
+                target_base.ori,
+            )
+            place_pose = geometry.Pose(
+                geometry.Vector3(
+                    table_box.center[0],
+                    table_box.center[1],
+                    place_hand_z,
+                ),
+                target_base.ori,
+            )
+            result["table_placement_geometry"] = {
+                "planner_object_to_hand_z_m": planner_object_to_hand_z,
+                "sim_object_to_hand_z_m": object_to_hand_z,
+                "estimated_object_half_z_m": object_half_z,
+                "table_top_z_m": table_top_z,
+                "place_object_z_m": place_object_z,
+                "place_hand_z_m": place_hand_z,
+                "place_high_z_m": place_high_z,
+                "place_pre_drop_z_m": place_pre_drop_z,
+                "probe_hand_z_m": probe_hand_z,
+                "probe_predicted_object_bottom_z_m": probe_object_bottom_z,
+                "probe_predicted_penetration_m": args.probe_penetration,
+            }
+            carry_high = geometry.Pose(
+                geometry.Vector3(
+                    target_odom.pos.x,
+                    target_odom.pos.y,
+                    place_high_z,
+                ),
+                target_base.ori,
+            )
+            result["steps"]["carry_high_before_table"] = _move_pose(
+                node,
+                capture,
+                "carry_high_before_table",
+                carry_high,
+                args.timeout_sec,
+                reference_frame=ODOM_FRAME,
+                enable_base=True,
+            )
+            if not _move_passed(result["steps"]["carry_high_before_table"]):
+                raise RuntimeError("机へ水平移動する前の持ち上げに失敗しました")
+            result["steps"]["place_high_with_attached_object"] = _move_pose(
+                node,
+                capture,
+                "place_high_with_attached_object",
+                place_high,
+                args.timeout_sec,
+                reference_frame=ODOM_FRAME,
+                enable_base=True,
+            )
+            if not _move_passed(result["steps"]["place_high_with_attached_object"]):
+                raise RuntimeError("Attached Objectを保持した机上高位置への移動に失敗しました")
+
+            # The hand center is intentionally still above the tabletop, while
+            # the attached object's bottom is inside the tabletop slab.  A
+            # rejection here is the direct regression check that the planner
+            # validates the attached shape, not only the robot links.
+            result["steps"]["attached_collision_probe"] = _move_pose(
+                node,
+                capture,
+                "attached_collision_probe",
+                probe_pose,
+                args.timeout_sec,
+                reference_frame=ODOM_FRAME,
+                enable_base=True,
+            )
+            result["steps"]["attached_collision_probe_rejected"] = _move_rejected(
+                result["steps"]["attached_collision_probe"]
+            )
+            if not result["steps"]["attached_collision_probe_rejected"]:
+                raise RuntimeError(
+                    "Attached Objectを机へ貫通させるprobeがRLPで拒否されませんでした"
+                )
+            node.publish_empty_constraints()
+            time.sleep(0.5)
+
+            result["steps"]["place_pre_drop"] = _move_pose(
+                node,
+                capture,
+                "place_pre_drop",
+                place_pre_drop,
+                args.timeout_sec,
+                reference_frame=ODOM_FRAME,
+                enable_base=True,
+            )
+            if not _move_passed(result["steps"]["place_pre_drop"]):
+                raise RuntimeError("机上の安全な下降前姿勢への移動に失敗しました")
+            result["steps"]["place_pose_with_attached_object"] = _move_pose(
+                node,
+                capture,
+                "place_pose_with_attached_object",
+                place_pose,
+                args.timeout_sec,
+                reference_frame=ODOM_FRAME,
+                enable_base=True,
+            )
+            if not _move_passed(result["steps"]["place_pose_with_attached_object"]):
+                raise RuntimeError("Attached Objectを保持した机上置き姿勢への移動に失敗しました")
+            time.sleep(0.8)
+            result["steps"]["attached_table_clearance"] = _table_clearance_report(
+                capture,
+                table_box,
+                sim_object_path,
+                grasp_response.grasp.size,
+                attached=True,
+            )
+            if not result["steps"]["attached_table_clearance"]["no_penetration"]:
+                raise RuntimeError("把持中の物体が机上面へ侵入しました")
 
         _publish_release(release_pub, args.object_id)
         result["steps"]["attached_object_remove"] = _wait_for_attached(
@@ -1080,6 +1574,22 @@ def main() -> int:
         result["steps"]["physical_sim_release"] = _wait_for_sim_grasp(
             capture, attached=False, timeout_sec=12.0
         )
+        if args.place_on_table and table_box is not None:
+            time.sleep(args.release_settle_sec)
+            released_clearance = _table_clearance_report(
+                capture,
+                table_box,
+                sim_object_path,
+                grasp_response.grasp.size,
+                attached=False,
+            )
+            result["steps"]["released_table_clearance"] = released_clearance
+            result["steps"]["placed_on_table"] = bool(
+                released_clearance.get("latest_center_inside_table", False)
+                and released_clearance.get("no_penetration", False)
+                and released_clearance.get("latest_origin_vertical_clearance_m") is not None
+                and released_clearance["latest_origin_vertical_clearance_m"] <= 0.12
+            )
         if obstacle_environment is not None:
             result["steps"]["physical_obstacle_contact"] = (
                 obstacle_environment.physical_contact_seen()
@@ -1103,8 +1613,35 @@ def main() -> int:
             and result["steps"].get("environment_obstacle_add", True)
             and not result["steps"].get("physical_obstacle_contact", False)
             and result["steps"].get("environment_obstacle_remove", True)
+            and (
+                not args.place_on_table
+                or (
+                    result["steps"].get("environment_table_add", False)
+                    and _move_passed(
+                        result["steps"].get("carry_high_before_table", {})
+                    )
+                    and _move_passed(
+                        result["steps"].get("place_high_with_attached_object", {})
+                    )
+                    and result["steps"].get(
+                        "attached_collision_probe_rejected", False
+                    )
+                    and _move_passed(result["steps"].get("place_pre_drop", {}))
+                    and _move_passed(
+                        result["steps"].get("place_pose_with_attached_object", {})
+                    )
+                    and result["steps"]
+                    .get("attached_table_clearance", {})
+                    .get("no_penetration", False)
+                    and result["steps"].get("placed_on_table", False)
+                )
+            )
         )
-        result["reason"] = "recognition_tf_grasp_attach_retreat_release"
+        result["reason"] = (
+            "recognition_tf_grasp_attach_retreat_release"
+            if not args.place_on_table
+            else "recognition_tf_grasp_attach_table_probe_place_release"
+        )
     except Exception as exc:  # keep JSONL diagnostics and clean up in finally
         result["error"] = str(exc)
         _print_event({"event": "error", "stage": "S5", "error": str(exc)})

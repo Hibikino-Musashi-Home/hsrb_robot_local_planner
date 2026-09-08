@@ -206,7 +206,8 @@ class RobotLocalPlanner(Node):
     def move_end_effector_pose(self, pose, ref_frame_id=None,
                                min_bounds=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                                max_bounds=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                               normalized_velocity=0.5):
+                               normalized_velocity=0.5,
+                               enable_base=True):
         if ref_frame_id is None:
             ref_frame_id = BASE
 
@@ -219,7 +220,11 @@ class RobotLocalPlanner(Node):
                                              max_bounds=max_bounds)
         tlc = self._create_tsr_link_constraint(tsr)
         constraints = _create_constraints(hlc=[tlc])
-        goal = _create_robot_local_goal(constraints, normalized_velocity)
+        goal = _create_robot_local_goal(
+            constraints,
+            normalized_velocity,
+            enable_base=enable_base,
+        )
         return self.publish(goal)
 
     def publish_empty_constraints(self):

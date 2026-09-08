@@ -629,6 +629,31 @@ def _multiply_quaternions(lhs: Any, rhs: Any) -> geometry.Quaternion:
     )
 
 
+def _quaternion_conjugate(quaternion: Any) -> geometry.Quaternion:
+    return geometry.Quaternion(
+        -quaternion.x,
+        -quaternion.y,
+        -quaternion.z,
+        quaternion.w,
+    )
+
+
+def _rotate_offset_between_orientations(
+    offset_xyz: tuple[float, float, float],
+    source_orientation: Any,
+    target_orientation: Any,
+) -> tuple[float, float, float]:
+    """Rotate a rigid object-to-hand offset when the hand changes posture."""
+    relative_rotation = _multiply_quaternions(
+        target_orientation,
+        _quaternion_conjugate(source_orientation),
+    )
+    return _rotate_vector(
+        relative_rotation,
+        geometry.Vector3(*offset_xyz),
+    )
+
+
 def _compose_odom_pose(
     odom_to_ref: Any,
     ref_to_hand: geometry.Pose,
@@ -1006,7 +1031,12 @@ def _move_pose(
             "x": target.pos.x,
             "y": target.pos.y,
             "z": target.pos.z,
-            "roll": math.pi,
+            "orientation_quaternion": {
+                "x": target.ori.x,
+                "y": target.ori.y,
+                "z": target.ori.z,
+                "w": target.ori.w,
+            },
         },
         "target_odom": {
             "x": target_odom.pos.x,
@@ -1386,6 +1416,28 @@ def main(argv: list[str] | None = None) -> int:
         help="add a static overhead shelf and verify a safe under-shelf placement",
     )
     parser.add_argument(
+        "--cabinet-place-under-shelf",
+        action="store_true",
+        help="align the measured tabletop patch and placement target under the shelf",
+    )
+    parser.add_argument(
+        "--cabinet-side-insertion",
+        action="store_true",
+        help=(
+            "place under the shelf by rotating the attached object to a "
+            "horizontal, front-to-back insertion posture"
+        ),
+    )
+    parser.add_argument(
+        "--cabinet-side-place-lift",
+        type=float,
+        default=0.045,
+        help=(
+            "extra height retained while the sideways-attached object is "
+            "inserted; it settles onto the tabletop after release"
+        ),
+    )
+    parser.add_argument(
         "--table-only",
         action="store_true",
         help="stop after table detection/geometry validation (diagnostic mode)",
@@ -1428,10 +1480,10 @@ def main(argv: list[str] | None = None) -> int:
     # Keep the shelf over the rear half of the tabletop.  This leaves the
     # front placement approach open while still making the overhead geometry
     # part of the attached-object planning scene.
-    parser.add_argument("--cabinet-shelf-center-y", type=float, default=0.70)
-    parser.add_argument("--cabinet-shelf-bottom-z", type=float, default=0.62)
+    parser.add_argument("--cabinet-shelf-center-y", type=float, default=0.62)
+    parser.add_argument("--cabinet-shelf-bottom-z", type=float, default=0.72)
     parser.add_argument("--cabinet-shelf-size-x", type=float, default=0.90)
-    parser.add_argument("--cabinet-shelf-size-y", type=float, default=0.16)
+    parser.add_argument("--cabinet-shelf-size-y", type=float, default=0.24)
     parser.add_argument("--cabinet-shelf-thickness", type=float, default=0.05)
     parser.add_argument(
         "--dynamic-bridge",
@@ -1598,6 +1650,8 @@ def main(argv: list[str] | None = None) -> int:
         "place_on_table": args.place_on_table,
         "detect_table": args.detect_table,
         "cabinet_overhead": args.cabinet_overhead,
+        "cabinet_place_under_shelf": args.cabinet_place_under_shelf,
+        "cabinet_side_insertion": args.cabinet_side_insertion,
         "dynamic_bridge": args.dynamic_bridge,
         "dynamic_object_id": args.dynamic_object_id if args.dynamic_bridge else None,
         "dynamic_truth_topic": (
@@ -1969,7 +2023,6 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 if args.detect_table:
                     static_sim_environment_ids.add(table_box.name)
-                environment_boxes.append(table_box)
                 if args.cabinet_overhead:
                     cabinet_box = Box(
                         "s6_3_cabinet_overhead_shelf",
@@ -1996,7 +2049,49 @@ def main(argv: list[str] | None = None) -> int:
                         "bottom_z": cabinet_box.bottom_z,
                         "top_z": cabinet_box.bottom_z + cabinet_box.dimensions[2],
                     }
+                    if args.cabinet_place_under_shelf:
+                        # The cloud estimator gives a reliable tabletop
+                        # height and observed patch size, but the camera sees
+                        # only the front part of this large tabletop.  For
+                        # this cabinet regression, use the explicitly
+                        # configured shelf projection as the placement
+                        # waypoint and move the measured patch there.  This
+                        # keeps the tabletop height/size perception-derived
+                        # while making the actual target lie under the shelf.
+                        observed_table_box = table_box
+                        result["table_detection"]["detected_table_box"] = {
+                            "id": observed_table_box.name,
+                            "center_xy": list(observed_table_box.center),
+                            "dimensions_xyz": list(observed_table_box.dimensions),
+                            "bottom_z": observed_table_box.bottom_z,
+                            "top_z": observed_table_box.bottom_z
+                            + observed_table_box.dimensions[2],
+                        }
+                        table_box = Box(
+                            observed_table_box.name,
+                            cabinet_box.center,
+                            observed_table_box.dimensions,
+                            bottom_z=observed_table_box.bottom_z,
+                        )
+                        table_collision_msg = (
+                            EnvironmentPublisher._to_collision_object(table_box)
+                        )
+                        result["table_detection"]["table_box"] = {
+                            "id": table_box.name,
+                            "center_xy": list(table_box.center),
+                            "dimensions_xyz": list(table_box.dimensions),
+                            "bottom_z": table_box.bottom_z,
+                            "top_z": table_box.bottom_z + table_box.dimensions[2],
+                        }
+                        result["table_detection"][
+                            "placement_patch_policy"
+                        ] = "measured_plane_shelf_projection"
+                        result["table_detection"][
+                            "placement_target_xy"
+                        ] = list(table_box.center)
+                        result["table"] = result["table_detection"]["table_box"]
                     environment_boxes.append(cabinet_box)
+                environment_boxes.append(table_box)
             result["environment_boxes"] = [
                 {
                     "id": box.name,
@@ -2200,14 +2295,32 @@ def main(argv: list[str] | None = None) -> int:
             planner_object_to_hand_z = (
                 grasp_odom.pose.position.z - target_odom.pos.z
             )
-            object_to_hand_z = (
-                result.get("sim_object_to_hand_offset_xyz", [0.0, 0.0, None])[2]
+            raw_object_to_hand_offset = result.get(
+                "sim_object_to_hand_offset_xyz"
             )
-            if object_to_hand_z is None:
+            if (
+                isinstance(raw_object_to_hand_offset, list)
+                and len(raw_object_to_hand_offset) == 3
+                and all(value is not None for value in raw_object_to_hand_offset)
+            ):
+                object_to_hand_xyz = tuple(
+                    float(value) for value in raw_object_to_hand_offset
+                )
+                object_to_hand_z = object_to_hand_xyz[2]
+            else:
+                object_to_hand_xyz = (0.0, 0.0, planner_object_to_hand_z)
                 object_to_hand_z = planner_object_to_hand_z
             object_half_z = max(
                 0.005,
                 float(grasp_response.grasp.size.z) * 0.5,
+            )
+            object_half_x = max(
+                0.005,
+                float(grasp_response.grasp.size.x) * 0.5,
+            )
+            object_half_y = max(
+                0.005,
+                float(grasp_response.grasp.size.y) * 0.5,
             )
             table_top_z = table_box.bottom_z + table_box.dimensions[2]
             place_center = (
@@ -2223,10 +2336,27 @@ def main(argv: list[str] | None = None) -> int:
             place_high_z = place_hand_z + args.place_high_offset
             place_pre_drop_z = place_hand_z + 0.10
             probe_object_bottom_z = table_top_z - args.probe_penetration
+            placement_orientation = target_base.ori
+            placement_mode = "top_down"
+            placement_object_to_hand_xyz = object_to_hand_xyz
+            placement_object_to_hand_z = object_to_hand_z
+            cabinet_side_insertion = bool(
+                args.cabinet_overhead
+                and args.cabinet_place_under_shelf
+                and args.cabinet_side_insertion
+                and cabinet_box is not None
+            )
+            side_place_lift = (
+                max(0.0, float(args.cabinet_side_place_lift))
+                if cabinet_side_insertion
+                else 0.0
+            )
+            if cabinet_side_insertion:
+                placement_mode = "horizontal_side_insertion"
             probe_hand_z = (
                 probe_object_bottom_z
                 + object_half_z
-                - planner_object_to_hand_z
+                - placement_object_to_hand_z
             )
             place_high = geometry.Pose(
                 geometry.Vector3(
@@ -2242,7 +2372,7 @@ def main(argv: list[str] | None = None) -> int:
                     place_center[1],
                     place_pre_drop_z,
                 ),
-                target_base.ori,
+                placement_orientation,
             )
             probe_pose = geometry.Pose(
                 geometry.Vector3(
@@ -2250,7 +2380,7 @@ def main(argv: list[str] | None = None) -> int:
                     place_center[1],
                     probe_hand_z,
                 ),
-                target_base.ori,
+                placement_orientation,
             )
             place_pose = geometry.Pose(
                 geometry.Vector3(
@@ -2258,11 +2388,154 @@ def main(argv: list[str] | None = None) -> int:
                     place_center[1],
                     place_hand_z,
                 ),
-                target_base.ori,
+                placement_orientation,
             )
+            if (
+                args.cabinet_overhead
+                and args.cabinet_place_under_shelf
+                and cabinet_box is not None
+            ):
+                shelf_half_x = cabinet_box.dimensions[0] * 0.5
+                shelf_half_y = cabinet_box.dimensions[1] * 0.5
+                under_shelf_x = (
+                    abs(place_center[0] - cabinet_box.center[0])
+                    + object_half_x
+                    <= shelf_half_x
+                )
+                under_shelf_y = (
+                    abs(place_center[1] - cabinet_box.center[1])
+                    + object_half_y
+                    <= shelf_half_y
+                )
+                physical_object_height = max(
+                    0.09,
+                    float(grasp_response.grasp.size.z),
+                )
+                predicted_object_origin_z = place_object_z + side_place_lift
+                predicted_object_top_z = (
+                    predicted_object_origin_z + physical_object_height
+                )
+                shelf_vertical_clearance = (
+                    cabinet_box.bottom_z - predicted_object_top_z
+                )
+                result["cabinet_under_shelf_check"] = {
+                    "placement_center_xy_m": list(place_center),
+                    "shelf_center_xy_m": list(cabinet_box.center),
+                    "object_half_size_xy_m": [object_half_x, object_half_y],
+                    "shelf_half_size_xy_m": [shelf_half_x, shelf_half_y],
+                    "object_inside_shelf_projection": bool(
+                        under_shelf_x and under_shelf_y
+                    ),
+                    "predicted_object_origin_z_m": predicted_object_origin_z,
+                    "predicted_object_top_z_m": predicted_object_top_z,
+                    "shelf_bottom_z_m": cabinet_box.bottom_z,
+                    "predicted_vertical_clearance_m": shelf_vertical_clearance,
+                    "placement_mode": placement_mode,
+                }
+                if not under_shelf_x or not under_shelf_y:
+                    raise RuntimeError(
+                        "配置目標が上棚の投影範囲から外れています"
+                    )
+                if shelf_vertical_clearance <= 0.0:
+                    raise RuntimeError(
+                        "配置物体の予測上端が上棚下面へ侵入します: "
+                        f"{shelf_vertical_clearance:.3f} m"
+                    )
+
+            side_object_to_hand_xyz = None
+            side_place_hand_z = None
+            side_target_hand_xy = None
+            side_front_hand_xy = None
+            side_front_object_y = None
+            if cabinet_side_insertion:
+                # The grasp remains top-down.  Once the object is attached,
+                # rotate the hand about the front of the shelf so the rigid
+                # object-to-hand offset points toward +Y.  The object then
+                # enters the shelf from the open/front (-Y) side while the
+                # hand stays at the opening instead of lowering the object
+                # vertically through the shelf.
+                placement_mode = "horizontal_side_insertion"
+                placement_orientation = geometry.pose(
+                    ei=-math.pi / 2.0,
+                ).ori
+                # Keep the attached object clear of the tabletop while the
+                # hand travels to the shelf front and changes orientation.
+                # The same lift is used for the final sideways release pose;
+                # after release the object settles onto the tabletop.
+                place_high_z += side_place_lift
+                side_object_to_hand_xyz = _rotate_offset_between_orientations(
+                    object_to_hand_xyz,
+                    target_base.ori,
+                    placement_orientation,
+                )
+                placement_object_to_hand_xyz = side_object_to_hand_xyz
+                placement_object_to_hand_z = side_object_to_hand_xyz[2]
+                side_place_hand_z = (
+                    place_object_z
+                    - placement_object_to_hand_z
+                    + side_place_lift
+                )
+                side_target_hand_xy = (
+                    place_center[0] - side_object_to_hand_xyz[0],
+                    place_center[1] - side_object_to_hand_xyz[1],
+                )
+                shelf_front_y = (
+                    cabinet_box.center[1] - cabinet_box.dimensions[1] * 0.5
+                )
+                front_object_margin = max(
+                    0.06,
+                    object_half_y + 0.025,
+                )
+                side_front_object_y = shelf_front_y - front_object_margin
+                side_front_hand_xy = (
+                    place_center[0] - side_object_to_hand_xyz[0],
+                    side_front_object_y - side_object_to_hand_xyz[1],
+                )
+                place_pre_drop_z = side_place_hand_z
+                place_high = geometry.Pose(
+                    geometry.Vector3(
+                        side_front_hand_xy[0],
+                        side_front_hand_xy[1],
+                        place_high_z,
+                    ),
+                    placement_orientation,
+                )
+                place_pre_drop = geometry.Pose(
+                    geometry.Vector3(
+                        side_front_hand_xy[0],
+                        side_front_hand_xy[1],
+                        side_place_hand_z,
+                    ),
+                    placement_orientation,
+                )
+                place_pose = geometry.Pose(
+                    geometry.Vector3(
+                        side_target_hand_xy[0],
+                        side_target_hand_xy[1],
+                        side_place_hand_z,
+                    ),
+                    placement_orientation,
+                )
+                probe_hand_z = (
+                    probe_object_bottom_z
+                    + object_half_z
+                    - placement_object_to_hand_z
+                )
+                probe_pose = geometry.Pose(
+                    geometry.Vector3(
+                        side_target_hand_xy[0],
+                        side_target_hand_xy[1],
+                        probe_hand_z,
+                    ),
+                    placement_orientation,
+                )
             result["table_placement_geometry"] = {
                 "planner_object_to_hand_z_m": planner_object_to_hand_z,
                 "sim_object_to_hand_z_m": object_to_hand_z,
+                "sim_object_to_hand_xyz_m": list(object_to_hand_xyz),
+                "placement_object_to_hand_xyz_m": list(
+                    placement_object_to_hand_xyz
+                ),
                 "estimated_object_half_z_m": object_half_z,
                 "table_top_z_m": table_top_z,
                 "placement_center_xy_m": list(place_center),
@@ -2271,13 +2544,35 @@ def main(argv: list[str] | None = None) -> int:
                     args.place_offset_y,
                 ],
                 "place_object_z_m": place_object_z,
-                "place_hand_z_m": place_hand_z,
+                "place_hand_z_m": place_pose.pos.z,
+                "attached_place_object_z_m": (
+                    place_object_z + side_place_lift
+                ),
+                "cabinet_side_place_lift_m": side_place_lift,
                 "place_high_z_m": place_high_z,
                 "place_pre_drop_z_m": place_pre_drop_z,
                 "probe_hand_z_m": probe_hand_z,
                 "probe_predicted_object_bottom_z_m": probe_object_bottom_z,
                 "probe_predicted_penetration_m": args.probe_penetration,
+                "placement_mode": placement_mode,
+                "placement_orientation_quaternion": [
+                    placement_orientation.x,
+                    placement_orientation.y,
+                    placement_orientation.z,
+                    placement_orientation.w,
+                ],
             }
+            if cabinet_side_insertion:
+                result["table_placement_geometry"].update({
+                    "shelf_front_y_m": (
+                        cabinet_box.center[1] - cabinet_box.dimensions[1] * 0.5
+                    ),
+                    "front_object_y_m": side_front_object_y,
+                    "front_hand_xy_m": list(side_front_hand_xy),
+                    "target_hand_xy_m": list(side_target_hand_xy),
+                    "insertion_direction": "+Y",
+                    "side_posture_roll_rad": -math.pi / 2.0,
+                })
             carry_high = geometry.Pose(
                 geometry.Vector3(
                     target_odom.pos.x,
@@ -2297,6 +2592,34 @@ def main(argv: list[str] | None = None) -> int:
             )
             if not _move_passed(result["steps"]["carry_high_before_table"]):
                 raise RuntimeError("机へ水平移動する前の持ち上げに失敗しました")
+            if cabinet_side_insertion:
+                # Change to the side-insertion posture while the object is
+                # still at the original, open location.  The following move
+                # to the shelf front is then horizontal in this posture;
+                # there is no top-down arm trajectory under the shelf.
+                side_carry_orientation_pose = geometry.Pose(
+                    geometry.Vector3(
+                        target_odom.pos.x,
+                        target_odom.pos.y,
+                        place_high_z,
+                    ),
+                    placement_orientation,
+                )
+                result["steps"]["cabinet_side_carry_orientation"] = _move_pose(
+                    node,
+                    capture,
+                    "cabinet_side_carry_orientation",
+                    side_carry_orientation_pose,
+                    args.timeout_sec,
+                    reference_frame=ODOM_FRAME,
+                    enable_base=True,
+                )
+                if not _move_passed(
+                    result["steps"]["cabinet_side_carry_orientation"]
+                ):
+                    raise RuntimeError(
+                        "棚から離れた位置での横向き搬送姿勢への変更に失敗しました"
+                    )
             result["steps"]["place_high_with_attached_object"] = _move_pose(
                 node,
                 capture,
@@ -2310,24 +2633,36 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuntimeError("Attached Objectを保持した机上高位置への移動に失敗しました")
 
             if args.cabinet_overhead and cabinet_box is not None:
-                # The safe placement point is in the open front part of the
-                # cabinet.  First ask RLP to move the attached object into the
-                # overhead shelf itself; this must be rejected before the
-                # actual under-shelf placement continues.
+                # First ask RLP to move the attached object into the overhead
+                # shelf itself; this must be rejected before the actual
+                # under-shelf placement continues.  In side-insertion mode
+                # the probe uses the same horizontal posture and compensates
+                # for the rotated object-to-hand offset.
                 shelf_probe_object_z = cabinet_box.bottom_z + 0.02
-                shelf_probe_hand_z = shelf_probe_object_z - object_to_hand_z
-                shelf_probe_pose = geometry.Pose(
-                    geometry.Vector3(
+                shelf_probe_hand_z = (
+                    shelf_probe_object_z - placement_object_to_hand_z
+                )
+                if cabinet_side_insertion and side_target_hand_xy is not None:
+                    shelf_probe_x, shelf_probe_y = side_target_hand_xy
+                else:
+                    shelf_probe_x, shelf_probe_y = (
                         cabinet_box.center[0],
                         cabinet_box.center[1],
+                    )
+                shelf_probe_pose = geometry.Pose(
+                    geometry.Vector3(
+                        shelf_probe_x,
+                        shelf_probe_y,
                         shelf_probe_hand_z,
                     ),
-                    target_base.ori,
+                    placement_orientation,
                 )
                 result["cabinet_shelf_probe_geometry"] = {
                     "probe_hand_z_m": shelf_probe_hand_z,
                     "probe_object_origin_z_m": shelf_probe_object_z,
                     "predicted_shelf_penetration_m": 0.02,
+                    "placement_mode": placement_mode,
+                    "target_hand_xy_m": [shelf_probe_x, shelf_probe_y],
                 }
                 result["steps"]["cabinet_shelf_collision_probe"] = _move_pose(
                     node,
@@ -2381,6 +2716,10 @@ def main(argv: list[str] | None = None) -> int:
                 enable_base=True,
             )
             if not _move_passed(result["steps"]["place_pre_drop"]):
+                if cabinet_side_insertion:
+                    raise RuntimeError(
+                        "棚前の水平挿入開始姿勢への移動に失敗しました"
+                    )
                 raise RuntimeError("机上の安全な下降前姿勢への移動に失敗しました")
             result["steps"]["place_pose_with_attached_object"] = _move_pose(
                 node,
@@ -2392,6 +2731,10 @@ def main(argv: list[str] | None = None) -> int:
                 enable_base=True,
             )
             if not _move_passed(result["steps"]["place_pose_with_attached_object"]):
+                if cabinet_side_insertion:
+                    raise RuntimeError(
+                        "Attached Objectを保持した棚下の水平挿入に失敗しました"
+                    )
                 raise RuntimeError("Attached Objectを保持した机上置き姿勢への移動に失敗しました")
             time.sleep(0.8)
             result["steps"]["attached_table_clearance"] = _table_clearance_report(
@@ -2565,6 +2908,14 @@ def main(argv: list[str] | None = None) -> int:
                     and _move_passed(
                         result["steps"].get("place_high_with_attached_object", {})
                     )
+                    and (
+                        not args.cabinet_side_insertion
+                        or _move_passed(
+                            result["steps"].get(
+                                "cabinet_side_carry_orientation", {}
+                            )
+                        )
+                    )
                     and result["steps"].get(
                         "attached_collision_probe_rejected", False
                     )
@@ -2593,6 +2944,18 @@ def main(argv: list[str] | None = None) -> int:
                         not args.cabinet_overhead
                         or result["steps"].get("cabinet_shelf_probe_rejected", False)
                     )
+                    and (
+                        not args.cabinet_place_under_shelf
+                        or result.get("cabinet_under_shelf_check", {}).get(
+                            "object_inside_shelf_projection", False
+                        )
+                    )
+                    and (
+                        not args.cabinet_side_insertion
+                        or result.get("table_placement_geometry", {}).get(
+                            "placement_mode"
+                        ) == "horizontal_side_insertion"
+                    )
                 )
             )
             and dynamic_pass
@@ -2600,7 +2963,11 @@ def main(argv: list[str] | None = None) -> int:
         result["reason"] = (
             "recognition_tf_grasp_attach_retreat_release"
             if not args.place_on_table
-            else "recognition_tf_grasp_attach_table_probe_place_release"
+            else (
+                "recognition_tf_grasp_attach_cabinet_side_insert_release"
+                if args.cabinet_side_insertion
+                else "recognition_tf_grasp_attach_table_probe_place_release"
+            )
         )
     except Exception as exc:  # keep JSONL diagnostics and clean up in finally
         result["error"] = str(exc)

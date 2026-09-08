@@ -2,9 +2,11 @@
 """Run the S6.3a cabinet-style tabletop placement regression.
 
 The scene contains a real static overhead shelf above the placement table.
-The runner keeps the safe placement point in the open front part, verifies
-that an attached-object target inside the shelf is rejected, and then places
-the object without contacting the shelf.
+The runner aligns the detected tabletop patch and places the object directly
+under the shelf.  After grasping from above, it rotates the hand at the shelf
+front and inserts the attached object horizontally from the open side.  It
+also verifies that a target penetrating the shelf is rejected and that the
+actual placement completes without shelf contact.
 """
 
 from __future__ import annotations
@@ -20,11 +22,13 @@ def main() -> int:
         ("--detect-table", None),
         ("--place-on-table", None),
         ("--cabinet-overhead", None),
+        ("--cabinet-place-under-shelf", None),
+        ("--cabinet-side-insertion", None),
+        ("--cabinet-side-place-lift", "0.045"),
         ("--table-observation-pan", "0.80"),
         ("--table-patch-size", "0.24"),
         ("--place-clearance", "0.015"),
         ("--place-high-offset", "0.0"),
-        ("--place-offset-y", "-0.08"),
     )
     for option, value in required:
         if option in arguments:

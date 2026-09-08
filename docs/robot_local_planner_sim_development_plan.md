@@ -598,12 +598,14 @@ runnerには直接指定しなくても、S6.3aの既定値として机観察pan
 
 #### S6.3a cabinet: 上棚付き配置面での衝突回避
 
-通常の机上配置が通った後、配置面の上に段があるキャビネット状の環境で同じフローを確認する。`SCENE=rlp_grasp_cabinet`は、S6.3aの物理机へ静的な上棚を1つ追加する。上棚は中心`(0.90, 0.70) m`、下面`z=0.62 m`、寸法`(0.90, 0.16, 0.05) m`とし、机の前方に配置経路を残しつつ、把持物体が上棚へ入り込むと衝突する位置関係にする。
+通常の机上配置が通った後、配置面の真上に段があるキャビネット状の環境で同じフローを確認する。`SCENE=rlp_grasp_cabinet`は、S6.3aの物理机へ静的な上棚を1つ追加する。上棚は中心`(0.90, 0.62) m`、下面`z=0.72 m`、寸法`(0.90, 0.24, 0.05) m`とし、配置面の投影範囲と重なる、実際に棚下へ置く条件にする。
 
 - 上棚はSim起動時にPhysX colliderとして生成し、実行中に物理形状を追加・削除しない。
 - runnerは上棚を`odom`の静的`CollisionObject`としてRLPへ登録するが、Simの物理環境bridgeへ重複登録しない。
-- 安全な配置点は机の観測パッチ中心から`y=-0.08 m`の前方へ置く。上棚の中心へ物体を侵入させるprobeは`VALIDATION_FAILURE(-4)`で拒否されなければならない。
-- 通常配置では上棚とのSim接触がなく、解放後に物体が机上へ残ることを確認する。
+- 机の高さ・観測パッチ寸法はGroundingDINOと`pcl_reconst`から推定し、配置用の測定パッチだけを棚の投影中心へ移す（`measured_plane_shelf_projection`）。Sim truthは照合専用で、配置目標の構築には使わない。
+- appleの把持までは従来のトップダウン姿勢で行う。把持後は棚から離れた位置で手先を横向き（roll`=-π/2`）へ変更し、物体―手先オフセットも同じ回転で補正する。
+- 物体を棚前面（`-Y`側）より手前へ水平搬送し、棚下面を通る区間は横向きのまま`+Y`方向へ挿入する。棚下で上から降ろす軌道は使用しない。解放前は`0.045 m`の側方配置リフトを残し、解放後に物体が机上へ着地する。
+- 上棚内部へのAttached Object目標と机へのAttached Object侵入probeは、ともに`VALIDATION_FAILURE(-4)`で拒否されなければならない。実際の配置では、棚とのSim接触がなく、把持中の物体が机へ侵入せず、解放後に物体が机上へ残ることを確認する。
 
 実行手順は、S6.3aの共通Apptainer手順を完了した後、ホスト側で次を起動する。
 
@@ -621,22 +623,45 @@ s6_3a_cabinet_grasp_place_runner.py \
   | tee /tmp/rlp_s63a_cabinet_static.jsonl
 ```
 
-#### S6.3a cabinet実行記録（2026-09-09）
+runnerには`--cabinet-place-under-shelf`、`--cabinet-side-insertion`、側方配置リフト`0.045 m`が既定で入っている。確認したい場合は次のように明示できる。
 
-初回の段付き環境では、上棚の前縁が手先・腕の水平経路に近すぎて配置直前のRLPゴールが成立しなかった。上棚を机の後方へ`y=0.70 m`移動して前方の安全な配置経路を確保したところ、同じ上棚を残したまま**1/1 PASS**となった。これは障害物を削除した結果ではなく、キャビネットの開口部を明示した環境調整である。
+```bash
+python3 src/4_manipulation/hsrb_robot_local_planner/tools/\
+s6_3a_cabinet_grasp_place_runner.py \
+  --cabinet-place-under-shelf --cabinet-side-insertion \
+  --cabinet-side-place-lift 0.045 \
+  --timeout-sec 55.0 --release-settle-sec 2.0 \
+  | tee /tmp/rlp_s63a_cabinet_side_insertion.jsonl
+```
+
+#### S6.3a cabinet旧仕様の実行記録（2026-09-09、受入条件から除外）
+
+初期実装では安全な配置点を棚の前方へ逃がしていたため、`y=0.70 m`へ棚を移動した条件で**1/1 PASS**となった。しかしこれは「棚の真下へ置く」検証になっていなかったため、S6.3a cabinetの合格記録としては採用しない。棚を配置面の投影上へ戻し、水平挿入シーケンスへ置き換えた。
 
 | 確認項目 | 結果 |
 | --- | --- |
 | 上棚の物理生成 | center`(0.90, 0.70) m`、bottom`z=0.62 m`、size`(0.90, 0.16, 0.05) m` |
-| 机認識 | GroundingDINO `table` + `pcl_reconst`平面、`top_z=0.45035 m` |
+| 判定 | 棚下への直接配置を評価していないため、旧仕様として保留 |
+
+#### S6.3a cabinet水平挿入の実行記録（2026-09-09）
+
+棚下面`z=0.72 m`の既定条件で、検出した机パッチを棚中心`(0.90, 0.62) m`へ合わせ、把持後に横向きへ変更して棚下へ水平挿入した。最終回帰は**1/1 PASS**である。
+
+| 確認項目 | 結果 |
+| --- | --- |
+| 机認識・配置目標 | GroundingDINO + `pcl_reconst`、検出`top_z=0.45035 m`、配置中心を棚投影`(0.90, 0.62) m`へ設定 |
 | apple認識・TF・把持 | YOLO→把持点推定→`odom` TF、Sim `attached=true` |
-| 上棚CollisionObject | RLPへ追加・削除成功。Sim物理bridgeへは重複登録なし |
-| 上棚衝突probe | 上棚内部へのAttached Object目標を`VALIDATION_FAILURE(-4)`で拒否 |
-| 通常の配置 | `place_high`、probe、下降、releaseが成功。`placed_on_table=true` |
+| 横向き姿勢 | roll`=-π/2`、quaternion`[-0.7071, 0, 0, 0.7071]` |
+| 水平挿入 | 棚前の物体目標`y=0.44 m`から棚下中心へ`+Y`挿入。手先目標は前面側`y≈0.509 m` |
+| 物体―手先オフセット | 把持時`[0.0184, 0.0040, -0.1112]`を横向き時`[0.0184, 0.1112, 0.0040] m`へ回転補正 |
+| 上棚衝突probe | Attached Objectの棚貫通目標を`VALIDATION_FAILURE(-4)`で拒否 |
+| 机侵入probe | Attached Objectの机貫通目標を`VALIDATION_FAILURE(-4)`で拒否 |
+| 把持中の机上クリアランス | 最小`50.2 mm`、貫通なし |
 | 上棚との物理接触 | `cabinet_physical_contact=false` |
+| 解放後 | `physical_sim_release=true`、`placed_on_table=true`、机上中心内 |
 | 試行全体 | **1/1 PASS** |
 
-ログは`/tmp/rlp_s63a_cabinet_y070_20260909.jsonl`に保存した。S6.3a cabinetの合格後に、動的障害物を同じ把持・配置経路へ追加する。
+ログは`/tmp/rlp_s63a_cabinet_side_insertion_20260909_v7_bottom072.jsonl`に保存した。S6.3a cabinetの水平挿入回帰が成立したため、次はこの配置シーケンスをS6.3bのBridgeAオンライン更新と組み合わせる。
 
 #### S6.3b: 動的障害物と把持・机上配置の統合
 

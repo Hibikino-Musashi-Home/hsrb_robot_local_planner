@@ -310,7 +310,7 @@ source install/setup.bash
 
 独立したclean runでは1、2、4、8、16のすべてが3/3 PASSとなり、今回のSim負荷では明確な最適値は決められなかった。したがって、S4までの既存設定と整合する`validation_thread_num=8`をS5の基準値として維持する。途中の同一Simでの連続実行では、前試行の状態を引き継いだ失敗やTF NaNが発生したため、thread数の性能比較には使わず、各設定をSim再起動またはclean resetして比較する。
 
-### S5: 把持物体（S5.1 認識→TF→把持→Attached Object）
+### S5: 把持物体（S5.1 認識→TF→把持、S5.2 障害物統合）
 
 S5.1では、競技アリーナや複数物体を使わず、既存の認識・把持点推定パッケージをそのまま接続する。
 
@@ -327,7 +327,7 @@ S5.1の対象は`carrobo-isaac`の`placement.rlp.yaml`にある、`odom=(0.70, 0
 
 検証順は「Sim reset → 観察姿勢 → apple認識 → 把持点推定 → TF変換 → free object登録 → pregrasp → free object削除 → 接触姿勢 → Sim物理attach → Attached Object追加 → 退避 → release → free object復元 → Sim物理release」とする。把持物体を毎周期の認識結果として更新する処理はS6まで入れない。
 
-実行runnerは [`tools/s5_recognition_grasp_runner.py`](../tools/s5_recognition_grasp_runner.py) である。S5.1のコマンドは次のとおりである。
+実行runnerは [`tools/s5_recognition_grasp_runner.py`](../tools/s5_recognition_grasp_runner.py) である。S5.1のコマンドは次のとおりである。S5.2では最後のrunnerコマンドに`--with-obstacle`を追加する。
 
 ```bash
 # ホスト側
@@ -362,6 +362,11 @@ source install/setup.bash
 python3 src/4_manipulation/hsrb_robot_local_planner/tools/s5_recognition_grasp_runner.py \
   --target apple --object-id s5_detected_object --timeout-sec 55.0 \
   | tee /tmp/rlp_s5_recognition_grasp.jsonl
+
+# S5.2: 上記のrunnerコマンドに --with-obstacle を追加
+python3 src/4_manipulation/hsrb_robot_local_planner/tools/s5_recognition_grasp_runner.py \
+  --target apple --object-id s5_detected_object --with-obstacle \
+  --timeout-sec 55.0 | tee /tmp/rlp_s5_with_obstacle.jsonl
 ```
 
 #### S5.1実行記録（2026-09-08）
@@ -378,7 +383,21 @@ python3 src/4_manipulation/hsrb_robot_local_planner/tools/s5_recognition_grasp_r
 | Attached Object | `hand_palm_link`へ追加を確認 |
 | 解放 | Attached Object削除、free形状復元、Sim `attached=false` |
 
-この結果で、S5.1の「認識結果をTFで固定座標へ変換し、RLPで把持位置へ移動し、把持中だけAttached Objectとして扱い、解放後にfree形状へ戻す」経路を確認できた。ただし、まだS4のBoxを同時に置いた搬送中の障害物検証は含めていない。次のS5.2では、S4の`one_side_pass`相当のBoxをappleの退避経路近傍へ追加し、Attached Objectを含む回避・接触除外・解放後の環境復元を検証する。
+この結果で、S5.1の「認識結果をTFで固定座標へ変換し、RLPで把持位置へ移動し、把持中だけAttached Objectとして扱い、解放後にfree形状へ戻す」経路を確認できた。
+
+#### S5.2実行記録（2026-09-08）
+
+S5.1と同じSimを`GRASP=1`で起動し、`--with-obstacle`を付けてS4の`one_side_pass`相当のBox（`s5_side_obstacle`、`odom`中心 `(0.55, 0.25) m`、寸法 `(0.30, 0.40, 0.30) m`）を追加した。BoxはRLPの`CollisionObject`とSimのPhysX colliderへ同じsequenceで登録し、appleのfree形状を削除してAttached Objectへ切り替えた状態で退避した。結果は**1/1 PASS**である。
+
+| 確認項目 | 結果 |
+| --- | --- |
+| 障害物の同期 | RLP/Simとも登録ack、解放後に削除ack |
+| RLP pregrasp / grasp / retreat | すべてSUCCESS、位置誤差 `14.1 mm` / `13.9 mm` / `15.5 mm` |
+| Attached Object搬送 | `hand_palm_link`への追加後、退避中にSim物体が `0.248 m` 移動 |
+| 物理接触 | 障害物との接触なし |
+| 解放後 | Attached Object削除、free形状復元、Sim `attached=false` |
+
+これでS5の最小構成（認識→TF→把持→Attached Object→障害物あり退避→解放）まで完了した。次はS6として、複数物体、認識位置ずれ、古い認識結果の削除、動的障害物を段階的に追加する。実機へ移る前には、`GRASP=1`のSim補助に依存しない把持判定と、S3.5で未確定の実機固有パラメータを実機側で再校正する。
 
 ## 実装成果物の予定
 
@@ -389,7 +408,7 @@ python3 src/4_manipulation/hsrb_robot_local_planner/tools/s5_recognition_grasp_r
 - S3.5のハードウェアモデル監査・基準動作スクリプト（`tools/s35_hardware_model_runner.py`）
 - `planner_status` / `displacements` / 実行時間の記録
 - S4の `CollisionObject` publisher・Sim PhysX scene bridge・固定Boxシナリオ・回避/到達不能回帰（`tools/s4_obstacle_runner.py`）
-- S5.1の認識→TF→把持→Attached Object回帰（`tools/s5_recognition_grasp_runner.py`）
+- S5.1/S5.2の認識→TF→把持→Attached Object・障害物統合回帰（`tools/s5_recognition_grasp_runner.py`）
 - S5のAttached Object publisherと衝突除外ペアの管理
 
 ### `carrobo-isaac`

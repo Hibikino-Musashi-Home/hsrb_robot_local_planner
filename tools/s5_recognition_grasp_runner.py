@@ -48,6 +48,7 @@ from std_srvs.srv import Empty
 from tf2_ros import TransformBroadcaster
 
 from grasp_point_detection_interfaces.srv import GraspPointService
+from s4_obstacle_runner import Box, EnvironmentPublisher
 from tmc_planning_msgs.msg import ConstraintsStatus, RobotLocalPlannerStatus
 from yolov8_detection_interfaces.srv import ObjectDetectionService
 
@@ -694,6 +695,11 @@ def main() -> int:
     )
     parser.add_argument("--pregrasp-offset", type=float, default=0.10)
     parser.add_argument("--approach-distance", type=float, default=0.05)
+    parser.add_argument(
+        "--with-obstacle",
+        action="store_true",
+        help="also register the S4-style side box in RLP and Isaac Sim",
+    )
     parser.add_argument("--timeout-sec", type=float, default=55.0)
     parser.add_argument("--reset-settle-sec", type=float, default=2.0)
     args = parser.parse_args()
@@ -704,6 +710,7 @@ def main() -> int:
     capture = Capture(node)
     frames = FramePublisher(node)
     environment_pub = node.create_publisher(CollisionObject, ENVIRONMENT_CONTROL_TOPIC, 10)
+    obstacle_environment = EnvironmentPublisher(node) if args.with_obstacle else None
     attach_pub = node.create_publisher(AttachedCollisionObject, ATTACH_TOPIC, 10)
     release_pub = node.create_publisher(String, RELEASE_TOPIC, 10)
     detect_client = node.create_client(ObjectDetectionService, "/yolov8_detection/service")
@@ -718,6 +725,7 @@ def main() -> int:
     whole_body = None
     attached_in_planner = False
     object_msg: CollisionObject | None = None
+    obstacle_box: Box | None = None
     result: dict[str, Any] = {
         "stage": "S5",
         "target": args.target,
@@ -941,6 +949,49 @@ def main() -> int:
             "quality": float(grasp_response.grasp.quality),
         }
 
+        if obstacle_environment is not None:
+            base_tf = _lookup_transform(node, ODOM_FRAME, BASE_FRAME)
+            base_pose = (
+                base_tf.translation.x,
+                base_tf.translation.y,
+                math.atan2(
+                    2.0 * (
+                        base_tf.rotation.w * base_tf.rotation.z
+                        + base_tf.rotation.x * base_tf.rotation.y
+                    ),
+                    1.0
+                    - 2.0 * (
+                        base_tf.rotation.y * base_tf.rotation.y
+                        + base_tf.rotation.z * base_tf.rotation.z
+                    ),
+                ),
+            )
+            # Keep the low box beside the arm's vertical carry path.  This is
+            # the S5.2 first integration slice: the same obstacle exists in
+            # the RLP PlanningScene and as a PhysX collider while the object
+            # changes from free to attached and back.
+            obstacle_box = Box(
+                "s5_side_obstacle",
+                (base_pose[0] + 0.55, base_pose[1] + 0.25),
+                (0.30, 0.40, 0.30),
+            )
+            result["obstacle"] = {
+                "id": obstacle_box.name,
+                "frame": ODOM_FRAME,
+                "center_xy": list(obstacle_box.center),
+                "dimensions_xyz": list(obstacle_box.dimensions),
+            }
+            if not obstacle_environment.wait_for_subscriber():
+                raise RuntimeError("S4/S5物理障害物bridgeのsubscriberがありません")
+            result["steps"]["environment_obstacle_add"] = (
+                obstacle_environment.publish_boxes(
+                    (obstacle_box,),
+                    reference_pose=base_pose,
+                )
+            )
+            if not result["steps"]["environment_obstacle_add"]:
+                raise RuntimeError("S5側方障害物の登録を確認できませんでした")
+
         object_msg = _collision_object(args.object_id, grasp_odom, grasp_response.grasp.size)
         result["steps"]["environment_add_before_grasp"] = _publish_environment(
             environment_pub,
@@ -1029,6 +1080,13 @@ def main() -> int:
         result["steps"]["physical_sim_release"] = _wait_for_sim_grasp(
             capture, attached=False, timeout_sec=12.0
         )
+        if obstacle_environment is not None:
+            result["steps"]["physical_obstacle_contact"] = (
+                obstacle_environment.physical_contact_seen()
+            )
+            result["steps"]["environment_obstacle_remove"] = (
+                obstacle_environment.publish_boxes(())
+            )
 
         result["pass"] = bool(
             result["reset_ok"]
@@ -1042,6 +1100,9 @@ def main() -> int:
             and result["steps"]["attached_object_remove"]
             and result["steps"]["environment_restore_after_release"]
             and result["steps"]["physical_sim_release"]
+            and result["steps"].get("environment_obstacle_add", True)
+            and not result["steps"].get("physical_obstacle_contact", False)
+            and result["steps"].get("environment_obstacle_remove", True)
         )
         result["reason"] = "recognition_tf_grasp_attach_retreat_release"
     except Exception as exc:  # keep JSONL diagnostics and clean up in finally
@@ -1055,6 +1116,11 @@ def main() -> int:
                 pass
         if gripper is not None:
             _gripper_command(gripper, 1.0)
+        if obstacle_environment is not None:
+            try:
+                obstacle_environment.publish_boxes(())
+            except Exception:
+                pass
         try:
             node.publish_empty_constraints()
             time.sleep(0.5)

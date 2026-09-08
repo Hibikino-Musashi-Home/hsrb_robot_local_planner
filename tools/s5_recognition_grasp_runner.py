@@ -25,6 +25,7 @@ import threading
 import time
 from typing import Any
 
+import numpy as np
 import rclpy
 import tf2_geometry_msgs  # noqa: F401  PoseStamped TF conversions
 from geometry_msgs.msg import Pose, PoseStamped, TransformStamped
@@ -38,16 +39,20 @@ from moveit_msgs.msg import (
     RobotState,
     RobotTrajectory,
 )
+from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
+from sensor_msgs.msg import PointCloud2
+from sensor_msgs_py import point_cloud2
 from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import String
 from std_srvs.srv import Empty
 from tf2_ros import TransformBroadcaster
 
 from grasp_point_detection_interfaces.srv import GraspPointService
+from hma_grounding_dino2_interfaces.srv import Detection2DService
 from s4_obstacle_runner import Box, EnvironmentPublisher
 from tmc_planning_msgs.msg import ConstraintsStatus, RobotLocalPlannerStatus
 from yolov8_detection_interfaces.srv import ObjectDetectionService
@@ -62,6 +67,9 @@ ATTACH_TOPIC = "/attached_object_publisher/attaching_object_info"
 ATTACHED_TOPIC = "/attached_object_publisher/attached_object"
 RELEASE_TOPIC = "/attached_object_publisher/releasing_object_name"
 SIM_GRASP_TOPIC = "/rlp_validation/grasp_state"
+TABLE_DETECTION_SERVICE = "/object_detection/grounding_dino2/service"
+TABLE_POINT_CLOUD_TOPIC = "/hma_pcl_reconst/depth_registered/points"
+TABLE_TRUTH_TOPIC = "/rlp_validation/table_truth"
 
 DONE_STATUSES = {ConstraintsStatus.SATISFIED, ConstraintsStatus.PREEMPTED}
 FAILURE_STATUSES = {
@@ -193,6 +201,70 @@ class Capture:
             return [(stamp, dict(state)) for stamp, state in self.sim_history]
 
 
+class PointCloudCapture:
+    """Keep the latest organized RGB-D cloud for table geometry estimation."""
+
+    def __init__(self, node: RobotLocalPlanner, topic: str) -> None:
+        self._lock = threading.Lock()
+        self._latest: PointCloud2 | None = None
+        self._event = threading.Event()
+        node.create_subscription(
+            PointCloud2,
+            topic,
+            self._callback,
+            qos_profile_sensor_data,
+        )
+
+    def _callback(self, msg: PointCloud2) -> None:
+        with self._lock:
+            self._latest = msg
+        self._event.set()
+
+    def latest(self) -> PointCloud2 | None:
+        with self._lock:
+            return self._latest
+
+    def wait_for_cloud(self, timeout_sec: float) -> bool:
+        return self._event.wait(timeout_sec)
+
+
+class TableTruthCapture:
+    """Capture the independent Sim table oracle for post-hoc diagnostics."""
+
+    def __init__(self, node: RobotLocalPlanner) -> None:
+        self._lock = threading.Lock()
+        self._latest: dict[str, Any] | None = None
+        node.create_subscription(
+            String,
+            TABLE_TRUTH_TOPIC,
+            self._callback,
+            qos_profile_sensor_data,
+        )
+
+    def _callback(self, msg: String) -> None:
+        try:
+            payload = json.loads(msg.data)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(payload, dict):
+            return
+        with self._lock:
+            self._latest = payload
+
+    def latest(self) -> dict[str, Any] | None:
+        with self._lock:
+            return dict(self._latest) if self._latest is not None else None
+
+    def wait_for_visible(self, timeout_sec: float) -> dict[str, Any] | None:
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            value = self.latest()
+            if value is not None and bool(value.get("visible", False)):
+                return value
+            time.sleep(0.05)
+        return self.latest()
+
+
 class FramePublisher:
     """Continuously publish the detected object and grasp target TF frames."""
 
@@ -228,6 +300,274 @@ class FramePublisher:
             msg.transform.rotation.w = target.ori.w
             messages.append(msg)
         self._broadcaster.sendTransform(messages)
+
+
+def _stamp_to_float(stamp: Any) -> float:
+    return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
+
+def _rotation_matrix(quaternion: Any) -> np.ndarray:
+    x, y, z, w = (
+        float(quaternion.x),
+        float(quaternion.y),
+        float(quaternion.z),
+        float(quaternion.w),
+    )
+    return np.array(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w),
+             2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z),
+             2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w),
+             1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _cloud_points_in_bbox(
+    cloud: PointCloud2,
+    bbox: Any,
+    stride: int,
+) -> np.ndarray:
+    """Read bbox pixels from an organized cloud without losing pixel indices.
+
+    ``read_points`` applies NaN filtering before indexing on Humble, so
+    ``skip_nans=False`` is intentional here.  GroundingDINO bbox coordinates
+    are top-left ``(x, y, w, h)`` pixels.
+    """
+    width = int(cloud.width)
+    height = int(cloud.height)
+    if width <= 0 or height <= 0:
+        return np.empty((0, 3), dtype=np.float64)
+    x0 = max(0, min(width - 1, int(round(float(bbox.x)))))
+    y0 = max(0, min(height - 1, int(round(float(bbox.y)))))
+    x1 = max(x0 + 1, min(width, x0 + int(round(float(bbox.w)))))
+    y1 = max(y0 + 1, min(height, y0 + int(round(float(bbox.h)))))
+    step = max(1, int(stride))
+    uvs = np.asarray(
+        [v * width + u
+         for v in range(y0, y1, step)
+         for u in range(x0, x1, step)],
+        dtype=np.int64,
+    )
+    if uvs.size == 0:
+        return np.empty((0, 3), dtype=np.float64)
+    points = point_cloud2.read_points(
+        cloud,
+        field_names=["x", "y", "z"],
+        skip_nans=False,
+        uvs=uvs,
+    )
+    if points.size == 0:
+        return np.empty((0, 3), dtype=np.float64)
+    xyz = np.column_stack((points["x"], points["y"], points["z"]))
+    xyz = np.asarray(xyz, dtype=np.float64)
+    return xyz[np.isfinite(xyz).all(axis=1)]
+
+
+def _transform_cloud_points(
+    node: RobotLocalPlanner,
+    cloud: PointCloud2,
+    xyz: np.ndarray,
+) -> tuple[np.ndarray, str]:
+    if len(xyz) == 0:
+        return xyz, "none"
+    stamp = Time.from_msg(cloud.header.stamp) if _stamp_to_float(
+        cloud.header.stamp) > 0.0 else Time()
+    try:
+        transform = node._tf2_buffer.lookup_transform(
+            ODOM_FRAME,
+            cloud.header.frame_id,
+            stamp,
+            timeout=Duration(seconds=0.15),
+        ).transform
+        mode = "message"
+    except Exception:
+        transform = node._tf2_buffer.lookup_transform(
+            ODOM_FRAME,
+            cloud.header.frame_id,
+            Time(),
+            timeout=Duration(seconds=0.15),
+        ).transform
+        mode = "latest"
+    translation = np.asarray(
+        [
+            float(transform.translation.x),
+            float(transform.translation.y),
+            float(transform.translation.z),
+        ],
+        dtype=np.float64,
+    )
+    return xyz @ _rotation_matrix(transform.rotation).T + translation, mode
+
+
+def _estimate_table_box(
+    node: RobotLocalPlanner,
+    cloud: PointCloud2,
+    bbox: Any,
+    point_stride: int,
+    placement_patch_size: float = 0.20,
+    object_id: str = "s6_3_detected_table",
+) -> tuple[Box, dict[str, Any]]:
+    """Estimate a safe tabletop patch from a detector bbox and RGB-D cloud.
+
+    The estimator does not know the Sim table pose.  It searches for a dense,
+    nearly horizontal height layer and makes a small placement patch around
+    the observed tabletop center.  A partial view is still useful: placing at
+    a measured patch is safer than extrapolating an unseen table edge.
+    """
+    raw_xyz = _cloud_points_in_bbox(cloud, bbox, point_stride)
+    points, tf_mode = _transform_cloud_points(node, cloud, raw_xyz)
+    diagnostics: dict[str, Any] = {
+        "cloud_frame": cloud.header.frame_id,
+        "cloud_stamp": _stamp_to_float(cloud.header.stamp),
+        "cloud_width": int(cloud.width),
+        "cloud_height": int(cloud.height),
+        "input_points": int(len(raw_xyz)),
+        "tf_mode": tf_mode,
+    }
+    if len(points) == 0:
+        raise RuntimeError("机bbox内の有効なPointCloud2点がありません")
+
+    finite = np.isfinite(points).all(axis=1)
+    roi = (
+        finite
+        & (points[:, 0] >= 0.15)
+        & (points[:, 0] <= 2.20)
+        & (points[:, 1] >= -1.20)
+        & (points[:, 1] <= 1.20)
+        & (points[:, 2] >= 0.12)
+        & (points[:, 2] <= 1.20)
+    )
+    base_tf = _lookup_transform(node, ODOM_FRAME, BASE_FRAME)
+    radial_sq = (
+        (points[:, 0] - float(base_tf.translation.x)) ** 2
+        + (points[:, 1] - float(base_tf.translation.y)) ** 2
+    )
+    roi &= radial_sq >= 0.30 ** 2
+    filtered = points[roi]
+    diagnostics["roi_points"] = int(len(filtered))
+    if len(filtered) < 80:
+        raise RuntimeError(
+            f"机bbox内の天板候補点が少なすぎます: {len(filtered)}点"
+        )
+
+    # A horizontal tabletop creates a sharp z peak.  Score a +/-15 mm slice
+    # using density and horizontal footprint; vertical background edges spread
+    # samples across many bins and are penalized by MAD.
+    bin_edges = np.arange(0.12, 1.205, 0.01)
+    counts, _ = np.histogram(filtered[:, 2], bins=bin_edges)
+    candidates: list[dict[str, Any]] = []
+    for index, count in enumerate(counts):
+        if int(count) < 20:
+            continue
+        center_z = float((bin_edges[index] + bin_edges[index + 1]) * 0.5)
+        slice_points = filtered[np.abs(filtered[:, 2] - center_z) <= 0.015]
+        if len(slice_points) < 40:
+            continue
+        xy_min = np.quantile(slice_points[:, :2], 0.05, axis=0)
+        xy_max = np.quantile(slice_points[:, :2], 0.95, axis=0)
+        extent = xy_max - xy_min
+        median_z = float(np.median(slice_points[:, 2]))
+        mad_z = float(np.median(np.abs(slice_points[:, 2] - median_z)))
+        footprint = max(0.0, float(extent[0] * extent[1]))
+        score = (
+            float(len(slice_points))
+            * (1.0 + min(3.0, footprint / 0.03))
+            / (1.0 + 80.0 * mad_z)
+        )
+        candidates.append({
+            "z_m": median_z,
+            "count": int(len(slice_points)),
+            "extent_xy_m": [float(extent[0]), float(extent[1])],
+            "mad_z_m": mad_z,
+            "score": score,
+        })
+    diagnostics["candidate_count"] = len(candidates)
+    diagnostics["candidates"] = sorted(
+        candidates, key=lambda item: item["score"], reverse=True
+    )[:10]
+    if not candidates:
+        raise RuntimeError("机bbox内に水平な天板候補が見つかりません")
+
+    selected = max(candidates, key=lambda item: item["score"])
+    top_z = float(selected["z_m"])
+    top_slice = filtered[np.abs(filtered[:, 2] - top_z) <= 0.025]
+    if len(top_slice) < 40:
+        raise RuntimeError("選択した天板高さの点が不足しています")
+    xy_min = np.quantile(top_slice[:, :2], 0.05, axis=0)
+    xy_max = np.quantile(top_slice[:, :2], 0.95, axis=0)
+    observed_extent_x = float(xy_max[0] - xy_min[0])
+    observed_extent_y = float(xy_max[1] - xy_min[1])
+    center_x = float((xy_min[0] + xy_max[0]) * 0.5)
+    center_y = float((xy_min[1] + xy_max[1]) * 0.5)
+    # The detector often sees only one part of a large tabletop.  Do not
+    # claim the unseen table boundary as a collision object: use a measured
+    # placement patch that is large enough for the YCB apple but small enough
+    # to stay inside the observed plane and leave the mobile base a route.
+    requested_patch = max(0.16, min(0.24, float(placement_patch_size)))
+    size_x = max(0.16, min(requested_patch, observed_extent_x - 0.02))
+    size_y = max(0.16, min(requested_patch, observed_extent_y - 0.02))
+    thickness = 0.03
+    table = Box(
+        object_id,
+        (center_x, center_y),
+        (size_x, size_y, thickness),
+        bottom_z=top_z - thickness,
+    )
+    diagnostics.update({
+        "selected_top_z_m": top_z,
+        "selected_center_xy": [center_x, center_y],
+        "observed_extent_xy_m": [observed_extent_x, observed_extent_y],
+        "placement_patch_policy": "measured_centered_patch",
+        "selected_dimensions_xyz": [size_x, size_y, thickness],
+        "selected_bottom_z": top_z - thickness,
+        "selected_points": int(len(top_slice)),
+    })
+    return table, diagnostics
+
+
+def _table_truth_check(
+    table: Box,
+    truth: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Compare detected geometry with Sim truth without feeding truth back."""
+    result: dict[str, Any] = {"available": False}
+    if truth is None or not bool(truth.get("visible", False)):
+        return result
+    center = truth.get("center_world")
+    dimensions = truth.get("dimensions_xyz")
+    top_z = truth.get("top_z")
+    if not isinstance(center, list) or len(center) < 2:
+        return result
+    if not isinstance(dimensions, list) or len(dimensions) < 2:
+        return result
+    if top_z is None:
+        return result
+    detected_top = table.bottom_z + table.dimensions[2]
+    dx = table.center[0] - float(center[0])
+    dy = table.center[1] - float(center[1])
+    truth_half_x = float(dimensions[0]) * 0.5
+    truth_half_y = float(dimensions[1]) * 0.5
+    detected_inside = (
+        abs(dx) + table.dimensions[0] * 0.5 <= truth_half_x
+        and abs(dy) + table.dimensions[1] * 0.5 <= truth_half_y
+    )
+    result.update({
+        "available": True,
+        "truth_center_xy": [float(center[0]), float(center[1])],
+        "truth_dimensions_xy": [float(dimensions[0]), float(dimensions[1])],
+        "truth_top_z_m": float(top_z),
+        "center_error_m": math.hypot(dx, dy),
+        "top_z_error_m": abs(detected_top - float(top_z)),
+        "detected_patch_inside_truth_table": detected_inside,
+        "pass": bool(
+            detected_inside and abs(detected_top - float(top_z)) <= 0.07
+        ),
+    })
+    return result
 
 
 def _rotate_vector(quaternion: Any, vector: Any) -> tuple[float, float, float]:
@@ -348,6 +688,104 @@ def _wait_future(future: Any, timeout_sec: float) -> Any:
     if future.exception() is not None:
         raise RuntimeError(str(future.exception()))
     return future.result()
+
+
+def _detect_table_geometry(
+    node: RobotLocalPlanner,
+    table_client: Any,
+    cloud_capture: PointCloudCapture,
+    truth_capture: TableTruthCapture,
+    args: argparse.Namespace,
+) -> tuple[Box, dict[str, Any]]:
+    """Run GroundingDINO and derive a tabletop Box from the matching cloud."""
+    if not table_client.wait_for_service(timeout_sec=15.0):
+        raise RuntimeError(
+            f"机検出サービスが見つかりません: {TABLE_DETECTION_SERVICE}"
+        )
+    if not cloud_capture.wait_for_cloud(timeout_sec=12.0):
+        raise RuntimeError(
+            f"机検出用PointCloud2が届きません: {TABLE_POINT_CLOUD_TOPIC}"
+        )
+
+    detection_attempts: list[list[str]] = []
+    last_error = ""
+    for _attempt in range(1, 6):
+        request = Detection2DService.Request()
+        request.confidence_th = args.table_confidence
+        request.iou_th = args.table_iou
+        request.use_latest_image = True
+        request.max_distance = args.table_max_distance
+        request.specific_id = ""
+        # Keep the prompt singular.  GroundingDINO can return a full-frame
+        # "table desk" box when multiple prompts are combined, which is less
+        # useful for the depth crop than a single table hypothesis.
+        request.class_prompts = [args.table_prompt]
+        response = _wait_future(table_client.call_async(request), 30.0)
+        detections = response.detections_2d
+        labels = [bbox.name for bbox in detections.bbox]
+        detection_attempts.append(labels)
+        candidates = [
+            (index, bbox)
+            for index, bbox in enumerate(detections.bbox)
+            if args.table_prompt.lower() in bbox.name.lower()
+            or "table" in bbox.name.lower()
+            or "desk" in bbox.name.lower()
+        ]
+        if not candidates:
+            last_error = f"机bboxなし: {labels}"
+            time.sleep(0.4)
+            continue
+        detection_index, bbox = max(candidates, key=lambda item: item[1].score)
+        cloud = cloud_capture.latest()
+        if cloud is None:
+            last_error = "机bboxに対応するPointCloud2がありません"
+            time.sleep(0.2)
+            continue
+        try:
+            table, cloud_diagnostics = _estimate_table_box(
+                node,
+                cloud,
+                bbox,
+                args.table_point_stride,
+                args.table_patch_size,
+            )
+        except Exception as exc:
+            last_error = str(exc)
+            time.sleep(0.4)
+            continue
+
+        truth = truth_capture.wait_for_visible(5.0)
+        truth_check = _table_truth_check(table, truth)
+        result = {
+            "service": TABLE_DETECTION_SERVICE,
+            "prompt": args.table_prompt,
+            "name": bbox.name,
+            "score": float(bbox.score),
+            "bbox_top_left_xywh": [
+                float(bbox.x), float(bbox.y), float(bbox.w), float(bbox.h)
+            ],
+            "frame_id": detections.header.frame_id,
+            "all_labels": labels,
+            "attempt_labels": detection_attempts,
+            "cloud": cloud_diagnostics,
+            "table_box": {
+                "id": table.name,
+                "center_xy": list(table.center),
+                "dimensions_xyz": list(table.dimensions),
+                "bottom_z": table.bottom_z,
+                "top_z": table.bottom_z + table.dimensions[2],
+            },
+            "truth_check": truth_check,
+            # This is intentionally diagnostic only.  Construction above
+            # used bbox + cloud + TF, never the truth topic.
+            "truth_used_for_construction": False,
+        }
+        _print_event({"event": "table_detection", **result})
+        return table, result
+    raise RuntimeError(
+        "机検出/天板点群推定に失敗しました: "
+        f"{last_error}; attempts={detection_attempts}"
+    )
 
 
 def _wait_for_goal(
@@ -881,7 +1319,7 @@ def _print_event(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, allow_nan=False), flush=True)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", default="apple")
     parser.add_argument("--object-id", default="s5_detected_object")
@@ -905,6 +1343,44 @@ def main() -> int:
         action="store_true",
         help="validate attached-object transfer, placement, and release on a tabletop",
     )
+    parser.add_argument(
+        "--detect-table",
+        action="store_true",
+        help="detect the placement table with GroundingDINO and PointCloud2",
+    )
+    parser.add_argument(
+        "--table-only",
+        action="store_true",
+        help="stop after table detection/geometry validation (diagnostic mode)",
+    )
+    parser.add_argument(
+        "--table-observation-pan",
+        type=float,
+        default=0.0,
+        help="head pan used for the placement-table observation",
+    )
+    parser.add_argument(
+        "--table-observation-tilt-deg",
+        type=float,
+        default=-50.0,
+        help="head tilt in degrees used for the placement-table observation",
+    )
+    parser.add_argument("--table-prompt", default="table")
+    parser.add_argument("--table-confidence", type=float, default=0.20)
+    parser.add_argument("--table-iou", type=float, default=0.50)
+    parser.add_argument("--table-max-distance", type=float, default=2.0)
+    parser.add_argument(
+        "--table-point-stride",
+        type=int,
+        default=3,
+        help="pixel stride used when cropping the organized table cloud",
+    )
+    parser.add_argument(
+        "--table-patch-size",
+        type=float,
+        default=0.20,
+        help="side length of the measured tabletop placement patch in meters",
+    )
     parser.add_argument("--table-center-x", type=float, default=0.82)
     parser.add_argument("--table-center-y", type=float, default=0.25)
     parser.add_argument("--table-bottom-z", type=float, default=0.30)
@@ -927,13 +1403,22 @@ def main() -> int:
     parser.add_argument("--release-settle-sec", type=float, default=2.0)
     parser.add_argument("--timeout-sec", type=float, default=55.0)
     parser.add_argument("--reset-settle-sec", type=float, default=2.0)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.table_only:
+        args.detect_table = True
+        args.place_on_table = False
 
     rclpy.init()
     node = RobotLocalPlanner()
     node.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, True)])
     capture = Capture(node)
     frames = FramePublisher(node)
+    cloud_capture = (
+        PointCloudCapture(node, TABLE_POINT_CLOUD_TOPIC)
+        if args.detect_table
+        else None
+    )
+    truth_capture = TableTruthCapture(node) if args.detect_table else None
     environment_pub = node.create_publisher(CollisionObject, ENVIRONMENT_CONTROL_TOPIC, 10)
     obstacle_environment = (
         EnvironmentPublisher(node)
@@ -944,6 +1429,11 @@ def main() -> int:
     release_pub = node.create_publisher(String, RELEASE_TOPIC, 10)
     detect_client = node.create_client(ObjectDetectionService, "/yolov8_detection/service")
     grasp_client = node.create_client(GraspPointService, "/grasp_point_detection/service")
+    table_client = (
+        node.create_client(Detection2DService, TABLE_DETECTION_SERVICE)
+        if args.detect_table
+        else None
+    )
     executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
@@ -956,11 +1446,14 @@ def main() -> int:
     object_msg: CollisionObject | None = None
     obstacle_box: Box | None = None
     table_box: Box | None = None
+    table_collision_msg: CollisionObject | None = None
+    table_in_planner = False
     environment_boxes: list[Box] = []
     environment_reference_pose: tuple[float, float, float] | None = None
     sim_object_path = ""
+    stage_name = "S6.3" if args.detect_table else "S5"
     result: dict[str, Any] = {
-        "stage": "S5",
+        "stage": stage_name,
         "target": args.target,
         "object_id": args.object_id,
         "pass": False,
@@ -969,7 +1462,7 @@ def main() -> int:
 
     _print_event({
         "event": "start",
-        "stage": "S5",
+        "stage": stage_name,
         "target": args.target,
         "object_id": args.object_id,
         "detection_service": "/yolov8_detection/service",
@@ -979,12 +1472,19 @@ def main() -> int:
         "attached_topic": ATTACHED_TOPIC,
         "sim_grasp_topic": SIM_GRASP_TOPIC,
         "place_on_table": args.place_on_table,
+        "detect_table": args.detect_table,
+        "table_detection_service": (
+            TABLE_DETECTION_SERVICE if args.detect_table else None
+        ),
+        "table_point_cloud_topic": (
+            TABLE_POINT_CLOUD_TOPIC if args.detect_table else None
+        ),
     })
 
     try:
-        if not detect_client.wait_for_service(timeout_sec=15.0):
+        if not args.table_only and not detect_client.wait_for_service(timeout_sec=15.0):
             raise RuntimeError("物体検出サービスが見つかりません")
-        if not grasp_client.wait_for_service(timeout_sec=15.0):
+        if not args.table_only and not grasp_client.wait_for_service(timeout_sec=15.0):
             raise RuntimeError("把持点推定サービスが見つかりません")
 
         robot = Robot()
@@ -1010,6 +1510,50 @@ def main() -> int:
         }
         if not result["steps"]["neutral"].get("physical_converged", False):
             raise RuntimeError("neutral姿勢への移動に失敗しました")
+
+        if args.detect_table:
+            if table_client is None or cloud_capture is None or truth_capture is None:
+                raise RuntimeError("机検出用のROS interfaceが初期化されていません")
+            table_observation_pose = dict(NEUTRAL_POSE)
+            table_observation_pose["head_pan_joint"] = args.table_observation_pan
+            table_observation_pose["head_tilt_joint"] = math.radians(
+                args.table_observation_tilt_deg
+            )
+            whole_body.move_to_joint_positions(table_observation_pose, sync=True)
+            result["steps"]["table_observation_pose"] = {
+                "controller": "hsrb_interface",
+                "targets": table_observation_pose,
+                **_wait_for_joints(node, table_observation_pose, 5.0),
+            }
+            if not result["steps"]["table_observation_pose"].get(
+                "physical_converged", False
+            ):
+                raise RuntimeError("机観察姿勢への移動に失敗しました")
+            time.sleep(1.0)
+            table_box, result["table_detection"] = _detect_table_geometry(
+                node,
+                table_client,
+                cloud_capture,
+                truth_capture,
+                args,
+            )
+            result["table"] = result["table_detection"]["table_box"]
+            if table_box is not None and args.place_on_table:
+                # The procedural table is already a physical Sim collider.
+                # Register only the measured tabletop patch in RLP, avoiding
+                # a duplicate physical obstacle that can contact the base.
+                table_collision_msg = EnvironmentPublisher._to_collision_object(
+                    table_box
+                )
+            if args.table_only:
+                truth_check = result["table_detection"].get("truth_check", {})
+                result["pass"] = bool(
+                    table_box is not None
+                    and truth_check.get("available", False)
+                    and truth_check.get("pass", False)
+                )
+                result["reason"] = "table_detection_geometry_only"
+                return 0 if result["pass"] else 1
 
         observation_pose = dict(NEUTRAL_POSE)
         observation_pose["head_pan_joint"] = args.observation_pan
@@ -1210,30 +1754,34 @@ def main() -> int:
                     "bottom_z": obstacle_box.bottom_z,
                 }
             if args.place_on_table:
-                # First placement slice: an elevated tabletop collision slab.
-                # It is deliberately independent of the competition furniture
-                # so the RLP and PhysX geometry can be compared exactly.
-                table_box = Box(
-                    "s5_tabletop",
-                    _local_xy_to_odom(
-                        base_pose,
-                        args.table_center_x,
-                        args.table_center_y,
-                    ),
-                    (args.table_size_x,
-                     args.table_size_y,
-                     args.table_thickness),
-                    bottom_z=args.table_bottom_z,
-                )
+                if table_box is None:
+                    # S5 compatibility path: an elevated tabletop collision
+                    # slab supplied by fixed command-line geometry.
+                    table_box = Box(
+                        "s5_tabletop",
+                        _local_xy_to_odom(
+                            base_pose,
+                            args.table_center_x,
+                            args.table_center_y,
+                        ),
+                        (args.table_size_x,
+                         args.table_size_y,
+                         args.table_thickness),
+                        bottom_z=args.table_bottom_z,
+                    )
+                    result["table"] = {
+                        "id": table_box.name,
+                        "frame": ODOM_FRAME,
+                        "center_xy": list(table_box.center),
+                        "dimensions_xyz": list(table_box.dimensions),
+                        "bottom_z": table_box.bottom_z,
+                        "top_z": table_box.bottom_z + table_box.dimensions[2],
+                    }
+                if table_collision_msg is None:
+                    table_collision_msg = EnvironmentPublisher._to_collision_object(
+                        table_box
+                    )
                 environment_boxes.append(table_box)
-                result["table"] = {
-                    "id": table_box.name,
-                    "frame": ODOM_FRAME,
-                    "center_xy": list(table_box.center),
-                    "dimensions_xyz": list(table_box.dimensions),
-                    "bottom_z": table_box.bottom_z,
-                    "top_z": table_box.bottom_z + table_box.dimensions[2],
-                }
             result["environment_boxes"] = [
                 {
                     "id": box.name,
@@ -1245,10 +1793,10 @@ def main() -> int:
             ]
             if not obstacle_environment.wait_for_subscriber():
                 raise RuntimeError("S4/S5物理環境bridgeのsubscriberがありません")
-            # Do not expose the tabletop while the robot is still moving the
-            # base to the grasp pose.  The placement slice registers it after
-            # the attached-object retreat, when the table becomes part of the
-            # collision model for all subsequent whole-body motions.
+            # Keep the detected tabletop out of the physical bridge while the
+            # robot is moving to the grasp pose.  In S6.3a the procedural Sim
+            # table is already a physical collider; the measured tabletop
+            # patch is added to RLP only after attached-object retreat below.
             initial_environment_boxes = tuple(
                 box for box in environment_boxes
                 if box is not table_box
@@ -1387,16 +1935,20 @@ def main() -> int:
             if obstacle_environment is None or environment_reference_pose is None:
                 raise RuntimeError("机上配置用の物理環境bridgeが初期化されていません")
 
-            # The base is allowed to reach the initial grasp pose before the
-            # table is introduced.  From this point the table is part of both
-            # collision worlds.  Placement targets stay in odom so RLP can use
-            # the arm/base combination needed by this HSR configuration.
-            result["steps"]["environment_table_add"] = (
-                obstacle_environment.publish_boxes(
-                    tuple(environment_boxes),
-                    reference_pose=environment_reference_pose,
-                )
+            if table_collision_msg is None:
+                raise RuntimeError("table_collision_msgが作成されていません")
+
+            # The procedural table is already a physical Sim collider.  Add
+            # only the measured tabletop patch to RLP after retreat; sending
+            # it through EnvironmentPublisher as well would create a second
+            # physical table and produce a false base-contact failure.
+            result["steps"]["environment_table_add"] = _publish_environment(
+                environment_pub,
+                capture,
+                table_collision_msg,
+                present=True,
             )
+            table_in_planner = result["steps"]["environment_table_add"]
             if not result["steps"]["environment_table_add"]:
                 raise RuntimeError("机上配置前のtable登録を確認できませんでした")
 
@@ -1590,6 +2142,14 @@ def main() -> int:
                 and released_clearance.get("latest_origin_vertical_clearance_m") is not None
                 and released_clearance["latest_origin_vertical_clearance_m"] <= 0.12
             )
+            if table_in_planner and table_collision_msg is not None:
+                result["steps"]["environment_table_remove"] = _publish_environment(
+                    environment_pub,
+                    capture,
+                    table_collision_msg,
+                    present=False,
+                )
+                table_in_planner = not result["steps"]["environment_table_remove"]
         if obstacle_environment is not None:
             result["steps"]["physical_obstacle_contact"] = (
                 obstacle_environment.physical_contact_seen()
@@ -1634,6 +2194,7 @@ def main() -> int:
                     .get("attached_table_clearance", {})
                     .get("no_penetration", False)
                     and result["steps"].get("placed_on_table", False)
+                    and result["steps"].get("environment_table_remove", False)
                 )
             )
         )
@@ -1644,8 +2205,18 @@ def main() -> int:
         )
     except Exception as exc:  # keep JSONL diagnostics and clean up in finally
         result["error"] = str(exc)
-        _print_event({"event": "error", "stage": "S5", "error": str(exc)})
+        _print_event({"event": "error", "stage": stage_name, "error": str(exc)})
     finally:
+        if table_in_planner and table_collision_msg is not None:
+            try:
+                _publish_environment(
+                    environment_pub,
+                    capture,
+                    table_collision_msg,
+                    present=False,
+                )
+            except Exception:
+                pass
         if attached_in_planner:
             try:
                 _publish_release(release_pub, args.object_id, repeat=4)

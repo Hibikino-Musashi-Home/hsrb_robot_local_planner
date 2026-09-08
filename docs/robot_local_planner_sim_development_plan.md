@@ -87,7 +87,7 @@ ros2 launch hsrb_robot_local_planner_node \
 | S2: 自由空間whole-body | 台車のみ、腕のみ、台車＋腕の複合目標。速度・加速度制約の確認 | S0の広い平面。外周壁に近づかず、まだ障害物回避は評価しない | 台車の直進・横移動・旋回と複合動作が安定。周期内に恒常的なtimeoutがない |
 | S3: Simチューニング | 候補数、IK初期値、評価重み、到達判定、時間予算を一項目ずつ調整 | 正面に対象物を1個だけ配置。例: apple/canを `x=0.65〜0.70, y=0` | 目標姿勢への接近・退避を固定シナリオで反復できる。変更前後を同じ指標で比較できる |
 | S3.5: ハードウェアモデル整合 | `tread`、`caster_offset`、`wheel_radius`、台車/関節の速度・加速度上限を明示し、台車4ケース＋関節8ケースを確認 | S0〜S2と同じ空間。物体・家具・障害物なし。SimはHSR-Bモデル | RLPの実行時パラメータがプロファイルと一致し、計画軌道の制限内で全ケースがSUCCESS・収束。実機の校正値確定は含めない |
-| S4: 静的環境障害物 | `PlanningSceneWorld.collision_objects` の入力と回避経路。衝突検証の安全マージン確認 | 箱または円柱を1個。まず横に回避可能な配置 | Sim上の障害物とRLPへ送った形状が一致し、接触せず回避。障害物を完全に塞いだ場合は失敗を正しく返す |
+| S4: 静的環境障害物 | `CollisionObject` の登録publisher、`odom`への座標変換、回避経路と到達不能判定 | 箱または円柱を1個。まず横に回避可能な配置 | Sim上の障害物とRLPへ送った形状が一致し、RLPの計画軌道が接触せず回避。障害物を完全に塞いだ場合は失敗を正しく返す |
 | S5: 把持物体 | `attached_collision_objects`、把持中の衝突除外ペア、attach/release | S4の障害物＋正面の対象物。把持後に退避・搬送 | 把持前、把持中、解放後で形状が正しく切り替わる。指との常時接触で全滅しない |
 | S6: 認識・動的環境 | PointCloud/検出結果からの形状化、更新周期、古い物体の削除 | 物体位置ずれ、複数障害物、最後に移動物体 | 座標変換、自己点群除去、形状数、更新遅延を含めて安定。静的シーンの回帰試験を壊さない |
 | S7: 実機移行 | 実機の速度・加速度・台車寸法・追従誤差に合わせる | Simと同じ固定シナリオを実機で再現 | まず無障害物・低速で確認し、S3〜S5相当のシナリオを順に実施 |
@@ -218,11 +218,51 @@ python3 src/4_manipulation/hsrb_robot_local_planner/tools/s35_hardware_model_run
 
 Isaac Simの見た目・物理衝突と、RLPの衝突判定用形状を同じ寸法・同じ `odom` 姿勢で管理する。RLP側へは点群やOctomapを直接送らず、少数のBox/Cylinderプリミティブへ変換して送る。
 
-最低限、次の3ケースを用意する。
+RLPのvalidatorが読むトピックは `collision_environment_server/transformed_environment` に固定されている。`PlanningSceneWorld.octomap` は使われない。`collision_environment_server` がこの出力を周期的に再発行するため、S4のpublisherは出力トピックへ直接送らず、入力トピック `collision_environment_server/collision_object` へ `moveit_msgs/CollisionObject` のBoxを `ADD/REMOVE` する。サーバが `odom` へ変換した出力をRLPが読む。座標は `CollisionObject.header.frame_id=odom`、`CollisionObject.pose` にBox中心と姿勢、`primitive_poses[0]` は単位姿勢で統一する。
 
-- 回避可能: 対象物への経路の横に箱を置く
-- 経路選択: 前方を部分的に塞ぎ、左右どちらかに抜けられるようにする
-- 到達不能: 前方を完全に塞ぎ、RLPが失敗を返すことを確認する
+S4の最小シナリオは次の3ケースとする。Box中心と目標は、各ケースでロボットがgo姿勢へ移った直後のロボットローカル座標で定義し、runnerが現在の `odom` 姿勢へ解決してから登録・送信する。目標はローカル座標 `(x=1.20, y=0, yaw=0)` とし、最初は腕のランダム中間姿勢との干渉を避けるため、台車高さだけを塞ぐBox（高さ `0.30 m`）で検証する。高い障害物とのwhole-body衝突は、低いBoxで台車回避が通った後に追加する。
+
+| ケース | Box中心 `(x,y)` [m] | Box寸法 `(x,y,z)` [m] | 期待結果 |
+| --- | --- | --- | --- |
+| `avoidable_box` | `(0.55, 0.00)` | `(0.30, 0.40, 0.30)` | 直進を避け、左右どちらかへ迂回して到達 |
+| `one_side_pass` | `(0.55, 0.25)` | `(0.30, 0.40, 0.30)` | 開いている負のy側へ迂回して到達 |
+| `blocked_wall` | `(0.55, 0.00)` | `(0.30, 3.00, 0.30)` | validator由来の計画失敗を返す |
+
+この固定publisherと基準動作を [`tools/s4_obstacle_runner.py`](../tools/s4_obstacle_runner.py) に実装した。`avoidable_box` と `one_side_pass` では、RLPが出した `world_joint` 軌道の最小Boxクリアランスと横方向の迂回量を診断し、`blocked_wall` では成功軌道を出さずにplanner failureを返すことを確認する。ケース切り替え時は入力トピックへ `REMOVE` を送り、ケース終了後に障害物がvalidatorのcacheへ残らないようにする。出力トピックへ直接送るとcollision environment serverの周期発行で上書きされるので注意する。
+
+障害物回避ではS3の候補数では乱数中間姿勢による迂回候補が不足したため、S4のSimプロファイルとして `generator_timeout=0.20`、`max_simple_trajectory_num=20`、`max_trajectory_num=50`、`validate_timeout=0.50` をlaunchへ設定した。`middle_state_base_position_range=1.0`、`generation_thread_num=4`、`validation_thread_num=8`、`optimize_timeout=0.05` は維持する。
+
+実行手順は次のとおりである。
+
+```bash
+# ホスト側
+xhost local:
+cd /home/hma/carrobo-isaac
+make up localhost SCENE=rlp_empty
+
+# Apptainer側（RLP launch用ターミナル）
+cd ~/carrobo26_ws
+bash 0_shell.sh
+. /entrypoint.sh
+source install/setup.bash
+. 5e_isaac_mode.sh
+ros2 launch hsrb_robot_local_planner_node \
+  hsrb_robot_local_planner.launch.py use_sim_time:=true
+
+# さらに別ターミナルで、同じApptainer初期化手順を実行
+cd ~/carrobo26_ws
+bash 0_shell.sh
+. /entrypoint.sh
+source install/setup.bash
+. 5e_isaac_mode.sh
+python3 src/4_manipulation/hsrb_robot_local_planner/tools/s4_obstacle_runner.py \
+  --scenario all --trials 1 --reset-settle-sec 2.0 --timeout-sec 45.0 \
+  | tee /tmp/rlp_s4_obstacles.jsonl
+```
+
+S4のRLP入力sliceは、2026-09-08に `all / 1 trial / timeout 45s` で `3/3` 合格した。`avoidable_box` は横方向最大約 `0.86 m`、`one_side_pass` は指定どおり負のy側、`blocked_wall` は `planner failure` だった。今回のrunnerはRLPの環境障害物入力を検証する最初のsliceであり、箱の見た目・PhysX衝突は `carrobo-isaac` 側にも同じ3ケースを追加してからS4完了とする。Sim側の物理Boxが未配置の状態でrunnerを実行した場合は、RLPの衝突検証・回避経路だけが検証対象であり、Sim上の接触なしを証明したことにはならない。
+
+合格条件は、環境topicにRLPのsubscriberが接続し、回避可能・片側通過の2ケースがplanner SUCCESS・制約終端・物理収束となり、計画軌道がBoxへ接触せず、到達不能ケースがplanner failureとなること、さらに同じID・寸法・`odom`姿勢のBoxがSim上にも存在し接触しないことである。
 
 最初から薄い板や複雑なメッシュを使わない。衝突検証のサンプリング間隔や計算時間の問題と、形状の問題を分離できなくなるためである。
 
@@ -240,7 +280,7 @@ Isaac Simの見た目・物理衝突と、RLPの衝突判定用形状を同じ�
 - S1〜S3の固定コマンド・回帰テストスクリプト（S3: `tools/s3_tuning_runner.py`）
 - S3.5のハードウェアモデル監査・基準動作スクリプト（`tools/s35_hardware_model_runner.py`）
 - `planner_status` / `displacements` / 実行時間の記録
-- S4の `PlanningSceneWorld` publisherまたはbridge
+- S4の `PlanningSceneWorld` publisher・固定Boxシナリオ・回避/到達不能回帰（`tools/s4_obstacle_runner.py`）
 - S5のAttached Object publisherと衝突除外ペアの管理
 
 ### `carrobo-isaac`

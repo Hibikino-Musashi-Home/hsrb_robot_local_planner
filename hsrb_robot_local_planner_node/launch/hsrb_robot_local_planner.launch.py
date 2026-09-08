@@ -84,10 +84,13 @@ def generate_launch_description():
     }
     generator_params = {
         'base_movement_type': 1,
-        # S3 Sim tuning (2026-09): 10 is enough for the fixed object approach
-        # while keeping the reactive loop lighter than the original 50.
-        'max_trajectory_num': 10,
-        'max_simple_trajectory_num': 5,
+        # S4 Sim tuning (2026-09): obstacle detours need more middle-state
+        # candidates than the S3 object-approach profile.  Keep the larger
+        # budget explicit so the obstacle regression is reproducible after a
+        # fresh launch.
+        'generator_timeout': 0.20,
+        'max_trajectory_num': 50,
+        'max_simple_trajectory_num': 20,
         'generation_thread_num': 4,
         'solver_type': 'hsrb_analytic_ik/HsrbIKSolver',
         'goal_sampler_type': 'tmc_simple_path_generator/SampleGoalGenerator',
@@ -165,7 +168,9 @@ def generate_launch_description():
         'time_from_start': 2.0,
         'time_from_end': 0.01,
         'interval_middle': 0.2,
-        'validate_timeout': 0.15,
+        # S4 Sim tuning (2026-09): validate the larger obstacle candidate set
+        # without prematurely rejecting all candidates on the FCL deadline.
+        'validate_timeout': 0.50,
         'validation_thread_num': 8,
         'collision_engine': 'fcl',
     }

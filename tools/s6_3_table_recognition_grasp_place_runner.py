@@ -27,10 +27,13 @@ def main() -> int:
         ("--table-patch-size", "0.20"),
         ("--place-clearance", "0.015"),
         ("--place-high-offset", "0.0"),
+        ("--final-linear-distance", "0.2"),
     )
     for option, value in defaults:
         if option not in arguments:
             arguments.extend([option, value])
+    if "--final-linear-axis" not in arguments:
+        arguments.extend(["--final-linear-axis", "0.0", "0.0", "-1.0"])
     return _run_s5_sequence(arguments)
 
 

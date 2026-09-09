@@ -40,6 +40,13 @@ def declare_arguments():
             'validation_thread_num',
             default_value='8',
             description='Number of collision-validation worker threads.'),
+        DeclareLaunchArgument(
+            'linear_constraint_step',
+            default_value='0.1',
+            description=(
+                'Waypoint spacing [m] for initial/goal-relative linear '
+                'path constraints.'),
+        ),
     ]
 
 
@@ -105,7 +112,8 @@ def generate_launch_description():
         'joint_weights': joint_weights,
         'base_names': ['world_joint'],
         'base_weights': base_weights,
-        'linear_constraint_step': 0.1,
+        'linear_constraint_step': ParameterValue(
+            LaunchConfiguration('linear_constraint_step'), value_type=float),
         'end_effectors': ['hand_palm_link'],
         'ik_joints': {
             'hand_palm_link': [

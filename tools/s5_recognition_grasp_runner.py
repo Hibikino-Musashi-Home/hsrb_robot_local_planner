@@ -62,7 +62,11 @@ from s6_pcl_dynamic_obstacle_runner import (
     _closest_truth as _dynamic_closest_truth,
     _wait_for_bridge_detection as _wait_for_dynamic_detection,
 )
-from tmc_planning_msgs.msg import ConstraintsStatus, RobotLocalPlannerStatus
+from tmc_planning_msgs.msg import (
+    ConstraintsStatus,
+    LinearConstraint,
+    RobotLocalPlannerStatus,
+)
 from yolov8_detection_interfaces.srv import ObjectDetectionService
 
 
@@ -984,6 +988,7 @@ def _move_pose(
     timeout_sec: float,
     reference_frame: str = ODOM_FRAME,
     enable_base: bool = False,
+    goal_relative_linear_constraint: LinearConstraint | None = None,
 ) -> dict[str, Any]:
     if reference_frame == ODOM_FRAME:
         target_odom = target
@@ -999,6 +1004,7 @@ def _move_pose(
         ref_frame_id=reference_frame,
         normalized_velocity=0.5,
         enable_base=enable_base,
+        goal_relative_linear_constraint=goal_relative_linear_constraint,
     )
     planner_status, constraint_status, planner_statuses, wait_sec = _wait_for_goal(
         capture, goal_id, timeout_sec
@@ -1046,6 +1052,19 @@ def _move_pose(
         "planner_status": planner_status,
         "planner_statuses": planner_statuses,
         "constraint_status": constraint_status,
+        "goal_relative_linear_constraint": (
+            {
+                "end_frame_id": goal_relative_linear_constraint.end_frame_id,
+                "axis": {
+                    "x": goal_relative_linear_constraint.axis.x,
+                    "y": goal_relative_linear_constraint.axis.y,
+                    "z": goal_relative_linear_constraint.axis.z,
+                },
+                "distance_m": goal_relative_linear_constraint.distance,
+            }
+            if goal_relative_linear_constraint is not None
+            else None
+        ),
         "status_wait_wall_sec": wait_sec,
         "wall_sec": time.monotonic() - start,
         **physical,
@@ -1527,6 +1546,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--place-high-offset", type=float, default=0.05)
     parser.add_argument(
+        "--final-linear-distance",
+        type=float,
+        default=0.0,
+        help=(
+            "enforce this final placement distance as a straight path in "
+            "the goal pose frame; zero disables the constraint"
+        ),
+    )
+    parser.add_argument(
+        "--final-linear-axis",
+        type=float,
+        nargs=3,
+        default=(0.0, 0.0, -1.0),
+        metavar=("AXIS_X", "AXIS_Y", "AXIS_Z"),
+        help="goal-relative axis for the final straight placement segment",
+    )
+    parser.add_argument(
         "--probe-penetration",
         type=float,
         default=0.02,
@@ -1536,6 +1572,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout-sec", type=float, default=55.0)
     parser.add_argument("--reset-settle-sec", type=float, default=2.0)
     args = parser.parse_args(argv)
+    if args.final_linear_distance < 0.0:
+        parser.error("--final-linear-distance must be non-negative")
+    if args.final_linear_distance > 0.0:
+        axis_norm = math.sqrt(sum(value * value for value in args.final_linear_axis))
+        if axis_norm <= 1.0e-9:
+            parser.error("--final-linear-axis must be non-zero when enabled")
     if args.table_only:
         args.detect_table = True
         args.place_on_table = False
@@ -2334,7 +2376,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             place_hand_z = place_object_z - object_to_hand_z
             place_high_z = place_hand_z + args.place_high_offset
-            place_pre_drop_z = place_hand_z + 0.10
+            # Keep the pre-drop pose at least as far from the goal as the
+            # requested goal-relative straight segment.  Otherwise the RLP
+            # constraint may terminate immediately because the current pose
+            # is already within its step threshold of the final pose.
+            place_pre_drop_z = place_hand_z + max(
+                0.10,
+                args.final_linear_distance,
+            )
             probe_object_bottom_z = table_top_z - args.probe_penetration
             placement_orientation = target_base.ori
             placement_mode = "top_down"
@@ -2489,9 +2538,11 @@ def main(argv: list[str] | None = None) -> int:
                 shelf_front_y = (
                     cabinet_box.center[1] - cabinet_box.dimensions[1] * 0.5
                 )
+                shelf_front_to_target = place_center[1] - shelf_front_y
                 front_object_margin = max(
                     0.06,
                     object_half_y + 0.025,
+                    args.final_linear_distance - shelf_front_to_target,
                 )
                 side_front_object_y = shelf_front_y - front_object_margin
                 side_front_hand_xy = (
@@ -2536,6 +2587,14 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     placement_orientation,
                 )
+            final_linear_constraint = None
+            if args.final_linear_distance > 0.0:
+                final_linear_constraint = LinearConstraint()
+                final_linear_constraint.end_frame_id = HAND_FRAME
+                final_linear_constraint.axis.x = float(args.final_linear_axis[0])
+                final_linear_constraint.axis.y = float(args.final_linear_axis[1])
+                final_linear_constraint.axis.z = float(args.final_linear_axis[2])
+                final_linear_constraint.distance = args.final_linear_distance
             result["table_placement_geometry"] = {
                 "planner_object_to_hand_z_m": planner_object_to_hand_z,
                 "sim_object_to_hand_z_m": object_to_hand_z,
@@ -2567,6 +2626,15 @@ def main(argv: list[str] | None = None) -> int:
                     else planner_object_to_hand_z
                 ),
                 "placement_mode": placement_mode,
+                "final_linear_constraint": (
+                    {
+                        "end_frame_id": final_linear_constraint.end_frame_id,
+                        "axis": list(args.final_linear_axis),
+                        "distance_m": final_linear_constraint.distance,
+                    }
+                    if final_linear_constraint is not None
+                    else None
+                ),
                 "placement_orientation_quaternion": [
                     placement_orientation.x,
                     placement_orientation.y,
@@ -2741,6 +2809,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.timeout_sec,
                 reference_frame=ODOM_FRAME,
                 enable_base=True,
+                goal_relative_linear_constraint=final_linear_constraint,
             )
             if not _move_passed(result["steps"]["place_pose_with_attached_object"]):
                 if cabinet_side_insertion:

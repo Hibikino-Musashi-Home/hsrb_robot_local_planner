@@ -18,6 +18,7 @@ def main() -> int:
         ("--table-patch-size", "0.24"),
         ("--place-clearance", "0.015"),
         ("--place-high-offset", "0.0"),
+        ("--final-linear-distance", "0.2"),
         ("--place-offset-y", "-0.08"),
     )
     for option, value in required:
@@ -26,6 +27,8 @@ def main() -> int:
         arguments.append(option)
         if value is not None:
             arguments.append(value)
+    if "--final-linear-axis" not in arguments:
+        arguments.extend(["--final-linear-axis", "0.0", "0.0", "-1.0"])
     if "--object-id" not in arguments:
         arguments.extend(["--object-id", "s6_3b_dynamic_object"])
     return _run_s5_sequence(arguments)

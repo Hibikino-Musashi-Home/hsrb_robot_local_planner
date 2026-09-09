@@ -526,6 +526,7 @@ S6.1は独立Simで1/1 PASSとなった。初期中心誤差は`0.0717 m`、更�
 - 推定した天板全体を真値で置き換えず、観測中心を中心とした`0.20 m × 0.20 m × 0.03 m`の測定配置パッチだけをRLPの`CollisionObject`として登録する。`/rlp_validation/table_truth`は誤差確認専用で、検出・配置の構築には使わない。
 - Simの机は物理コライダとして1つだけ生成する。runnerはそれをPhysXの環境障害物ブリッジへ重複登録せず、退避後にRLPの計画モデルへ配置パッチを追加し、解放後に削除する。この分離により、机の二重生成による台車接触を机上配置の失敗と誤判定しない。
 - appleは既存の`yolov8_detection`→`grasp_point_detection`で認識・把持点推定し、TFで`odom`へ変換する。free `CollisionObject`、Sim物理attach、`AttachedCollisionObject`、退避、机上高移動、侵入probe拒否、下降、release、机上残留を一つのrunnerで確認する。
+- S6.3の最終配置移動には、RLP既存の`goal_relative_linear_constraint`を適用する。既定値はゴール姿勢の`hand_palm_link`座標系で軸`(0, 0, -1)`、距離`0.20 m`とし、通常配置では上から下、cabinet配置では横向きの前面から奥への最後の直進区間を表す。制約のwaypoint間隔は検証時に`linear_constraint_step:=0.02`とする。
 
 実行時のROSターミナルはすべて、次のApptainer手順を最初に通す。ホスト側のGUI公開も先に行う。
 
@@ -549,7 +550,8 @@ source install/setup.bash
 ```bash
 # Apptainer 1: RLP
 ros2 launch hsrb_robot_local_planner_node \
-  hsrb_robot_local_planner.launch.py use_sim_time:=true validation_thread_num:=8
+  hsrb_robot_local_planner.launch.py use_sim_time:=true validation_thread_num:=8 \
+  linear_constraint_step:=0.02
 
 # Apptainer 2: BridgeA入力用のhma_pcl_reconst2
 ros2 launch hma_pcl_reconst2 pcl_reconst.launch.py \
@@ -575,7 +577,7 @@ s6_3_table_recognition_grasp_place_runner.py \
   | tee /tmp/rlp_s63a_static_table_grasp_place.jsonl
 ```
 
-runnerには直接指定しなくても、S6.3aの既定値として机観察pan`0.80 rad`、配置パッチ`0.24 m`、解放前クリアランス`0.015 m`、高位置オフセット`0 m`が入っている。机だけを切り出して確認する場合は、最後のコマンドに`--table-only`を追加する。
+runnerには直接指定しなくても、静的机のS6.3a runnerの既定値として机観察pan`0.80 rad`、配置パッチ`0.20 m`、解放前クリアランス`0.015 m`、高位置オフセット`0 m`が入っている。cabinetとS6.3bでは配置パッチを`0.24 m`とする。机だけを切り出して確認する場合は、最後のコマンドに`--table-only`を追加する。
 
 #### S6.3a実行記録（2026-09-09）
 
@@ -677,6 +679,7 @@ S6.3bでは、S6.1/S6.2のBridgeAをS6.3aの認識→TF→把持→Attached Obje
 - appleを認識して`odom` TFを出し、把持、Attached Object登録、退避、机上配置、解放が成功する。
 - Attached Object登録後にもBridgeA更新が1回以上ある。
 - Sim truthがhiddenになった後、BridgeAが`pointcloud_stale`の`REMOVE`を発行する。
+- 最終配置の`place_pose_with_attached_object`が`goal_relative_linear_constraint`（距離`0.20 m`、軸`(0, 0, -1)`）付きでplanner SUCCESS・物理収束する。
 - 動的Box、机、上棚とのSim物理接触がない。
 
 実行手順は、ROSを使う各ターミナルで次の共通手順を守る。RLPのlaunchには`validation_thread_num:=8`を指定する。
@@ -695,7 +698,8 @@ bash 0_shell.sh
 source install/setup.bash
 . 5e_isaac_mode.sh
 ros2 launch hsrb_robot_local_planner_node \
-  hsrb_robot_local_planner.launch.py use_sim_time:=true validation_thread_num:=8
+  hsrb_robot_local_planner.launch.py use_sim_time:=true validation_thread_num:=8 \
+  linear_constraint_step:=0.02
 
 # Apptainer側（hma_pcl_reconst2）
 cd ~/carrobo26_ws
@@ -779,6 +783,18 @@ s6_3b_dynamic_grasp_place_runner.py \
 ログは`/tmp/rlp_s63b_dynamic_grasp_place_20260909_rerun2.jsonl`に保存した。なお、GroundingDINO/PCLの机検出パッチは観測中心ベースで生成するため、今回のログではSim truthとの机中心照合は合格条件に含めていない（`truth_check.pass=false`）が、実際のRLP配置では机上中心内・貫通なし・解放後残留を確認した。S6.3bの最小統合回帰は修正版でも成立したため、次は複数クラスタ、意図的な認識位置ずれ、部分遮蔽、点群レート低下、更新遅延の分布を追加する。これらとS5/S6.3aの回帰が安定するまでは実機へ移行しない。
 
 同条件の追加再実行も**1/1 PASS**となった。初期中心誤差`0.0742 m`、BridgeA更新`46回`（Attached Object登録後`23回`）、検出中心Y差`0.3407 m`、机上配置中の最小クリアランス`4.76 mm`、Attached Objectの机貫通probeはplanner status`-4`で拒否、物理接触なしであった。ログは`/tmp/rlp_s63b_dynamic_grasp_place_20260909_rerun3.jsonl`に保存した。
+
+#### S6.3最終直進制約の回帰（2026-09-09）
+
+S6.3の最終配置ステップへ`goal_relative_linear_constraint`を追加し、RLPを`validation_thread_num:=8 linear_constraint_step:=0.02`で再起動して、静的机・上棚付き机・動的障害物の3条件を再実行した。runnerの既定値は`end_frame_id=hand_palm_link`、goal姿勢基準の軸`(0, 0, -1)`、距離`0.20 m`である。通常の机では上から下、cabinetではroll`=-π/2`の横向き姿勢で`+Y`へ挿入する最後の区間に対応する。
+
+| 条件 | 結果 | 最終配置制約 | 追加確認 |
+| --- | --- | --- | --- |
+| S6.3 静的机 | **1/1 PASS** | `0.20 m`、`(0,0,-1)`、`hand_palm_link` | 机侵入probe`-4`、最小搬送中クリアランス`2.85 mm`、解放後机上残留、物理接触なし |
+| S6.3a cabinet | **1/1 PASS** | `0.20 m`、`(0,0,-1)`、`hand_palm_link` | 棚内probe`-4`、机侵入probe`-4`、棚下面の予測余裕`106.2 mm`、搬送中最小クリアランス`51.1 mm`、物理接触なし |
+| S6.3b BridgeA | **1/1 PASS** | `0.20 m`、`(0,0,-1)`、`hand_palm_link` | BridgeA更新`47回`（Attached後`22回`）、検出Y移動`0.3438 m`、stale削除、最小搬送中クリアランス`0.26 mm`、物理接触なし |
+
+cabinetでは、棚前から最終姿勢までの距離が制約距離を下回らないよう、棚前の物体開始位置を`y=0.42 m`へ設定した。これにより、最終hand目標`y=0.5086 m`との差が`0.20 m`となり、横方向の最終直進区間を確保できた。ログはそれぞれ`/tmp/rlp_s63a_static_table_grasp_place_20260909_linear02.jsonl`、`/tmp/rlp_s63a_cabinet_linear02_20260909_rerun2.jsonl`、`/tmp/rlp_s63b_dynamic_grasp_place_20260909_linear02.jsonl`に保存した。
 
 ## 実装成果物の予定
 

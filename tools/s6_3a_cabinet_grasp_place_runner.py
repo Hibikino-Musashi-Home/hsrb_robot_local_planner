@@ -29,6 +29,7 @@ def main() -> int:
         ("--table-patch-size", "0.24"),
         ("--place-clearance", "0.015"),
         ("--place-high-offset", "0.0"),
+        ("--final-linear-distance", "0.2"),
     )
     for option, value in required:
         if option in arguments:
@@ -36,6 +37,8 @@ def main() -> int:
         arguments.append(option)
         if value is not None:
             arguments.append(value)
+    if "--final-linear-axis" not in arguments:
+        arguments.extend(["--final-linear-axis", "0.0", "0.0", "-1.0"])
     if "--object-id" not in arguments:
         arguments.extend(["--object-id", "s6_3a_cabinet_object"])
     return _run_s5_sequence(arguments)

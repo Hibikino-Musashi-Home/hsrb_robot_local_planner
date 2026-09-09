@@ -778,6 +778,8 @@ s6_3b_dynamic_grasp_place_runner.py \
 
 ログは`/tmp/rlp_s63b_dynamic_grasp_place_20260909_rerun2.jsonl`に保存した。なお、GroundingDINO/PCLの机検出パッチは観測中心ベースで生成するため、今回のログではSim truthとの机中心照合は合格条件に含めていない（`truth_check.pass=false`）が、実際のRLP配置では机上中心内・貫通なし・解放後残留を確認した。S6.3bの最小統合回帰は修正版でも成立したため、次は複数クラスタ、意図的な認識位置ずれ、部分遮蔽、点群レート低下、更新遅延の分布を追加する。これらとS5/S6.3aの回帰が安定するまでは実機へ移行しない。
 
+同条件の追加再実行も**1/1 PASS**となった。初期中心誤差`0.0742 m`、BridgeA更新`46回`（Attached Object登録後`23回`）、検出中心Y差`0.3407 m`、机上配置中の最小クリアランス`4.76 mm`、Attached Objectの机貫通probeはplanner status`-4`で拒否、物理接触なしであった。ログは`/tmp/rlp_s63b_dynamic_grasp_place_20260909_rerun3.jsonl`に保存した。
+
 ## 実装成果物の予定
 
 ### このリポジトリ

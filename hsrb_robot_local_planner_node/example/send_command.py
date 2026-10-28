@@ -83,7 +83,7 @@ def _create_task_space_region(origin_to_tsr: Pose,
 def _create_tsr_link_constraint(tsr: TaskSpaceRegion,
                                 ref_frame_id: str = 'odom') -> TsrLinkConstraint:
     tlc = TsrLinkConstraint()
-    tlc.tsr = tsr
+    tlc.tsrs = [tsr]
     tlc.header.frame_id = ref_frame_id
     return tlc
 
@@ -95,8 +95,8 @@ def _create_constraints(hjc: list[RangeJointConstraint] = [],
                         grlc: LinearConstraint = LinearConstraint()) -> Constraints:
     return Constraints(hard_joint_constraints=hjc,
                        hard_link_constraints=hlc,
-                       initial_motion_linear_constraint=imlc,
-                       goal_relative_linear_constraint=grlc,
+                       initial_motion_linear_constraints=[imlc],
+                       goal_relative_linear_constraints=[grlc],
                        hard_path_link_constraints=hplc)
 
 

@@ -404,10 +404,10 @@ void RobotLocalPlannerNodeWithActionTest::PublishRobotState(double arm_flex_posi
 
   control_msgs::msg::JointTrajectoryControllerState base_state;
   base_state.joint_names = {"odom_x", "odom_y", "odom_t"};
-  base_state.desired.positions = {0.0, 0.0, 0.0};
-  base_state.desired.velocities = {0.0, 0.0, 0.0};
-  base_state.actual.positions = {0.0, 0.0, 0.0};
-  base_state.actual.velocities = {0.0, 0.0, 0.0};
+  base_state.reference.positions = {0.0, 0.0, 0.0};
+  base_state.reference.velocities = {0.0, 0.0, 0.0};
+  base_state.feedback.positions = {0.0, 0.0, 0.0};
+  base_state.feedback.velocities = {0.0, 0.0, 0.0};
 
   // There is no way to detect that the optimization node has received the topic, so run it an appropriate number of times
   for (auto i = 0; i < 20; i++) {

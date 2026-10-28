@@ -47,8 +47,6 @@ import tf2_ros
 from tmc_planning_msgs.msg import (
     Constraints,
     ConstraintsStatus,
-    LinearConstraint,
-    LinearConstraintWithPose,
     RangeJointConstraint,
     RobotLocalGoal,
     RobotLocalPlannerStatus,
@@ -81,8 +79,8 @@ def _create_constraints(
     hlc=[],
     sjc=[],
     slc=[],
-    grlc=LinearConstraint(),
-    imlc=LinearConstraintWithPose(),
+    grlc=[],
+    imlc=[],
     hplc=[],
     spjc=[]
 ):
@@ -90,8 +88,8 @@ def _create_constraints(
                        hard_link_constraints=hlc,
                        soft_joint_constraints=sjc,
                        soft_link_constraints=slc,
-                       goal_relative_linear_constraint=grlc,
-                       initial_motion_linear_constraint=imlc,
+                       goal_relative_linear_constraints=grlc,
+                       initial_motion_linear_constraints=imlc,
                        hard_path_link_constraints=hplc,
                        soft_path_joint_constraints=spjc)
 
@@ -241,7 +239,7 @@ class RobotLocalPlanner(Node):
 
     def _create_tsr_link_constraint(self, tsr, ref_frame_id=ODOM):
         tlc = TsrLinkConstraint()
-        tlc.tsr = tsr
+        tlc.tsrs = [tsr]
         tlc.header.frame_id = ref_frame_id
         return tlc
 

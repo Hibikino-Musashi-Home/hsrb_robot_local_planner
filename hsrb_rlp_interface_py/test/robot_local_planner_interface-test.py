@@ -289,7 +289,7 @@ def test_move_end_effector_pose(setup):
     assert _wait_for_constraints(goal_cache, executor)
 
     goal = goal_cache.data
-    link = goal.constraints.hard_link_constraints[0].tsr
+    link = goal.constraints.hard_link_constraints[0].tsrs[0]
 
     assert goal.constraints.hard_link_constraints[0].header.frame_id == 'odom'
     assert link.tsr_to_end.position.x == pytest.approx(0.5)

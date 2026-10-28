@@ -375,12 +375,12 @@ void RobotLocalPlannerNodeBase::CalcInitOdomState(nav_msgs::msg::Odometry& odom_
     std::lock_guard<std::mutex> lock(base_controller_state_mutex_);
     base_state = *base_controller_state_;
   }
-  odom_out.twist.twist.linear.x = base_state.actual.velocities[0];
-  odom_out.twist.twist.linear.y = base_state.actual.velocities[1];
-  odom_out.twist.twist.angular.z = base_state.actual.velocities[2];
-  odom_out.pose.pose.position.x = base_state.actual.positions[0] + base_state.actual.velocities[0] * kConnectPoint;
-  odom_out.pose.pose.position.y = base_state.actual.positions[1] + base_state.actual.velocities[1] * kConnectPoint;
-  const double yaw_angle = base_state.actual.positions[2] + base_state.actual.velocities[2] * kConnectPoint;
+  odom_out.twist.twist.linear.x = base_state.feedback.velocities[0];
+  odom_out.twist.twist.linear.y = base_state.feedback.velocities[1];
+  odom_out.twist.twist.angular.z = base_state.feedback.velocities[2];
+  odom_out.pose.pose.position.x = base_state.feedback.positions[0] + base_state.feedback.velocities[0] * kConnectPoint;
+  odom_out.pose.pose.position.y = base_state.feedback.positions[1] + base_state.feedback.velocities[1] * kConnectPoint;
+  const double yaw_angle = base_state.feedback.positions[2] + base_state.feedback.velocities[2] * kConnectPoint;
   odom_out.pose.pose.orientation.z = std::sin(yaw_angle / 2.0);
   odom_out.pose.pose.orientation.w = std::cos(yaw_angle / 2.0);
 }
